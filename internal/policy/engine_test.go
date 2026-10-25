@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bjin/wgsteer/internal/endpoints"
 	"github.com/bjin/wgsteer/internal/stats"
 )
 
@@ -54,7 +55,7 @@ func newFixture(t *testing.T, p Params, n, sel int) *fixture {
 	if sel >= 0 {
 		s = f.addrs[sel]
 	}
-	e, err := New(p, f.addrs, s, t0)
+	e, err := New(p, endpoints.Unnamed(f.addrs), s, t0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -163,14 +164,14 @@ func TestNewAndValidate(t *testing.T) {
 	if _, err := New(p, nil, netip.AddrPort{}, t0); err == nil {
 		t.Error("empty list accepted")
 	}
-	if _, err := New(p, []netip.AddrPort{addrs[0], addrs[0]}, netip.AddrPort{}, t0); err == nil {
+	if _, err := New(p, endpoints.Unnamed([]netip.AddrPort{addrs[0], addrs[0]}), netip.AddrPort{}, t0); err == nil {
 		t.Error("duplicate accepted")
 	}
-	if _, err := New(p, addrs[:1], addrs[1], t0); err == nil {
+	if _, err := New(p, endpoints.Unnamed(addrs[:1]), addrs[1], t0); err == nil {
 		t.Error("unlisted selection accepted")
 	}
 	mapped := netip.AddrPortFrom(netip.AddrFrom16(addrs[1].Addr().As16()), addrs[1].Port())
-	e, err := New(p, addrs, mapped, t0)
+	e, err := New(p, endpoints.Unnamed(addrs), mapped, t0)
 	if err != nil || e.Selected() != addrs[1] {
 		t.Errorf("mapped selection: %v %v", e.Selected(), err)
 	}
@@ -188,7 +189,7 @@ func TestNewAndValidate(t *testing.T) {
 		if q.Validate() == nil {
 			t.Errorf("bad params #%d accepted", i)
 		}
-		if _, err := New(q, addrs, netip.AddrPort{}, t0); err == nil {
+		if _, err := New(q, endpoints.Unnamed(addrs), netip.AddrPort{}, t0); err == nil {
 			t.Errorf("New with bad params #%d accepted", i)
 		}
 	}
@@ -434,7 +435,7 @@ func TestCooldownAllKinds(t *testing.T) {
 		f := newFixture(t, p, 3, 0)
 		f.cycle(100, 100, 100)
 		f.cycle(100, 100, 100)
-		if err := f.e.Reload(f.addrs[1:], f.now); err != nil {
+		if err := f.e.Reload(endpoints.Unnamed(f.addrs[1:]), f.now); err != nil {
 			t.Fatal(err)
 		}
 		d := f.e.Tick(f.now)
@@ -806,7 +807,7 @@ func TestReload(t *testing.T) {
 
 	t.Run("keep selection", func(t *testing.T) {
 		list := []netip.AddrPort{f.addrs[2], f.addrs[1], f.addrs[0]}
-		if err := f.e.Reload(list, f.now); err != nil {
+		if err := f.e.Reload(endpoints.Unnamed(list), f.now); err != nil {
 			t.Fatal(err)
 		}
 		d := f.e.Tick(f.now)
@@ -825,7 +826,7 @@ func TestReload(t *testing.T) {
 	t.Run("remove selection", func(t *testing.T) {
 		d := netip.MustParseAddrPort("[2001:db8::1]:51820")
 		list := []netip.AddrPort{f.addrs[2], f.addrs[0], d}
-		if err := f.e.Reload(list, f.now); err != nil {
+		if err := f.e.Reload(endpoints.Unnamed(list), f.now); err != nil {
 			t.Fatal(err)
 		}
 		if f.e.Selected().IsValid() {
@@ -856,7 +857,7 @@ func TestReload(t *testing.T) {
 		if err := f.e.Reload(nil, f.now); err == nil {
 			t.Error("empty list accepted")
 		}
-		if err := f.e.Reload([]netip.AddrPort{f.addrs[0], f.addrs[0]}, f.now); err == nil {
+		if err := f.e.Reload(endpoints.Unnamed([]netip.AddrPort{f.addrs[0], f.addrs[0]}), f.now); err == nil {
 			t.Error("duplicate accepted")
 		}
 		if got := f.e.List(); len(got) != len(before) || got[0] != before[0] {
@@ -864,13 +865,64 @@ func TestReload(t *testing.T) {
 		}
 	})
 	t.Run("removed endpoint returns empty", func(t *testing.T) {
-		if err := f.e.Reload(f.addrs, f.now); err != nil {
+		if err := f.e.Reload(endpoints.Unnamed(f.addrs), f.now); err != nil {
 			t.Fatal(err)
 		}
 		if v := f.e.Tick(f.now).Record.Endpoints[1]; v.Samples != 0 || v.RestoreLevel != 0 {
 			t.Errorf("re-added endpoint kept history: %+v", v)
 		}
 	})
+}
+
+// TestNames: reasons and views label endpoints by configured name or, when
+// unnamed, by list index, and both follow a reload that renames and
+// reorders the list.
+func TestNames(t *testing.T) {
+	p := fastParams()
+	p.Persist = 4 * time.Second
+	f := newFixture(t, p, 3, 0)
+	a, b, c := f.addrs[0], f.addrs[1], f.addrs[2]
+	if err := f.e.Reload([]endpoints.Endpoint{{Addr: a, Name: "us"}, {Addr: b}, {Addr: c, Name: "jp-v6"}}, f.now); err != nil {
+		t.Fatal(err)
+	}
+	f.cycle(100, 100, 100)
+	f.cycle(100, 100, 100)
+	d := f.cycle(200, 100, 100)
+	wantBlocked(t, d, BlockerPersist, "persist 3/4 s (#1 "+b.String()+" better")
+	for !d.Switch {
+		d = f.cycle(200, 100, 100)
+	}
+	wantSwitch(t, d, KindDegrade, b)
+	if want := "G(#us " + a.String() + "→#1 " + b.String() + ")"; !strings.Contains(d.Reason, want) {
+		t.Errorf("switch reason %q, want %q", d.Reason, want)
+	}
+	f.commit(d)
+	names := func(d Decision) string {
+		var n []string
+		for _, v := range d.Record.Endpoints {
+			n = append(n, fmt.Sprintf("%d:%s", v.Index, v.Name))
+		}
+		return strings.Join(n, " ")
+	}
+	if got := names(d); got != "0:us 1:1 2:jp-v6" {
+		t.Errorf("view names %q", got)
+	}
+
+	// Reorder and rename: b gets a name, a loses its own, c moves first.
+	if err := f.e.Reload([]endpoints.Endpoint{{Addr: c, Name: "jp-v6"}, {Addr: b, Name: "direct"}, {Addr: a}}, f.now); err != nil {
+		t.Fatal(err)
+	}
+	d = f.cycle(100, 100, 100) // rtts of a, b, c (f.addrs order)
+	if got := names(d); got != "0:jp-v6 1:direct 2:2" {
+		t.Errorf("view names after reload %q", got)
+	}
+	for !d.Switch {
+		d = f.cycle(50, 100, 200)
+	}
+	wantSwitch(t, d, KindDegrade, a)
+	if want := "G(#direct " + b.String() + "→#2 " + a.String() + ")"; !strings.Contains(d.Reason, want) {
+		t.Errorf("switch reason after reload %q, want %q", d.Reason, want)
+	}
 }
 
 func TestTimeGapReset(t *testing.T) {

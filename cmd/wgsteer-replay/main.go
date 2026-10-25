@@ -4,7 +4,7 @@
 //
 // Stdin is one JSON job:
 //
-//	{"trace": "trace.tsv", "endpoints": ["ip:port", ...],
+//	{"trace": "trace.tsv", "endpoints": ["ip:port", ...], "names": ["us", "1", ...],
 //	 "segments": [{"id": 0, "start_us": 1792594211722000, "selection": 9}, ...],
 //	 "runs": [{"name": "...", "endpoints": [0, 1, 8, 9], "start": 9,
 //	           "args": ["--persist", "60s"], "segments": [1], "decisions": false,
@@ -14,7 +14,9 @@
 // trace.tsv has one row per probe slot: segment, slot_us, tick_us, index,
 // outcome (r/l/i), rtt_us, logged decision (tab-separated, '#' comments).
 // Times are microseconds since the epoch; endpoint indices refer to the
-// recorded list.
+// recorded list. names (optional) are the recorded display names; reasons
+// label endpoints with them (default: the recorded index), whatever the
+// subset.
 //
 // Each run replays its segments (daemon starts; default all) with a fresh
 // engine created at the segment start and the device on endpoint start
@@ -53,6 +55,7 @@ import (
 	"time"
 
 	"github.com/bjin/wgsteer/internal/daemon"
+	"github.com/bjin/wgsteer/internal/endpoints"
 	"github.com/bjin/wgsteer/internal/policy"
 	"github.com/bjin/wgsteer/internal/stats"
 )
@@ -60,6 +63,7 @@ import (
 type job struct {
 	Trace     string    `json:"trace"`
 	Endpoints []string  `json:"endpoints"`
+	Names     []string  `json:"names"`
 	Segments  []segment `json:"segments"`
 	Runs      []run     `json:"runs"`
 }
@@ -152,13 +156,21 @@ func replay(in io.Reader, out io.Writer) error {
 	if err := dec.Decode(&j); err != nil {
 		return fmt.Errorf("job: %w", err)
 	}
+	if len(j.Names) != 0 && len(j.Names) != len(j.Endpoints) {
+		return fmt.Errorf("job: %d names for %d endpoints", len(j.Names), len(j.Endpoints))
+	}
 	addrs := make([]netip.AddrPort, len(j.Endpoints))
+	names := make([]string, len(j.Endpoints))
 	for i, s := range j.Endpoints {
 		ap, err := netip.ParseAddrPort(s)
 		if err != nil {
 			return fmt.Errorf("endpoint #%d: %w", i, err)
 		}
 		addrs[i] = ap
+		names[i] = strconv.Itoa(i)
+		if len(j.Names) != 0 && j.Names[i] != "" {
+			names[i] = j.Names[i]
+		}
 	}
 	segs := make(map[int]segment, len(j.Segments))
 	for _, s := range j.Segments {
@@ -175,7 +187,7 @@ func replay(in io.Reader, out io.Writer) error {
 	for range runtime.GOMAXPROCS(0) {
 		wg.Go(func() {
 			for i := range next {
-				results[i] = replayRun(j.Runs[i], addrs, rows, segs)
+				results[i] = replayRun(j.Runs[i], addrs, names, rows, segs)
 			}
 		})
 	}
@@ -246,7 +258,7 @@ func readTrace(path string, n int, segs map[int]segment) ([]row, error) {
 	return rows, nil
 }
 
-func replayRun(rs run, addrs []netip.AddrPort, rows []row, segs map[int]segment) result {
+func replayRun(rs run, addrs []netip.AddrPort, names []string, rows []row, segs map[int]segment) result {
 	res := result{Name: rs.Name, Switches: []switchEvent{}, Blockers: map[string]int{}}
 	fail := func(err error) result {
 		res.Error = err.Error()
@@ -262,12 +274,16 @@ func replayRun(rs run, addrs []netip.AddrPort, rows []row, segs map[int]segment)
 	}
 	pos := slices.Repeat([]int{-1}, len(addrs)) // recorded index → subset position
 	list := make([]netip.AddrPort, len(rs.Endpoints))
+	named := make([]endpoints.Endpoint, len(rs.Endpoints))
 	for k, i := range rs.Endpoints {
 		if i < 0 || i >= len(addrs) || pos[i] >= 0 {
 			return fail(fmt.Errorf("bad or duplicate endpoint index %d", i))
 		}
 		pos[i] = k
 		list[k] = addrs[i]
+		// The recorded name (or index), so reasons name the same endpoint
+		// whatever the subset.
+		named[k] = endpoints.Endpoint{Addr: addrs[i], Name: names[i]}
 	}
 	for _, id := range rs.Segments {
 		if _, ok := segs[id]; !ok {
@@ -307,7 +323,7 @@ func replayRun(rs run, addrs []netip.AddrPort, rows []row, segs map[int]segment)
 			if start >= 0 && start < len(addrs) && pos[start] >= 0 {
 				sel = addrs[start]
 			}
-			if eng, err = policy.New(p, list, sel, time.UnixMicro(segs[seg].StartUS)); err != nil {
+			if eng, err = policy.New(p, named, sel, time.UnixMicro(segs[seg].StartUS)); err != nil {
 				return fail(err)
 			}
 		}

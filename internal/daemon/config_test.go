@@ -3,6 +3,7 @@ package daemon
 import (
 	"errors"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -94,6 +95,18 @@ func TestParseFlagsProbeSizeBoundByMTU(t *testing.T) {
 		_, err := ParseFlags(c.args, DefaultConfig(), io.Discard)
 		if (err == nil) != c.ok {
 			t.Errorf("%v: err = %v, want ok=%v", c.args[len(c.args)-4:], err, c.ok)
+		}
+	}
+}
+
+func TestParseFlagsLogMaxAgeAtLeastOneHour(t *testing.T) {
+	for _, c := range []struct {
+		age string
+		ok  bool
+	}{{"1h", true}, {"59m59s", false}} {
+		args := append(slices.Clone(requiredArgs), "--log-dir", "/tmp/l", "--log-max-age", c.age)
+		if _, err := ParseFlags(args, DefaultConfig(), io.Discard); (err == nil) != c.ok {
+			t.Errorf("--log-max-age %s: err = %v", c.age, err)
 		}
 	}
 }

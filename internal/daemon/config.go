@@ -44,6 +44,8 @@ type Config struct {
 	NftTable          string
 	DryRun            bool
 	LogLevel          slog.Level
+	LogDir            string
+	LogMaxAge         time.Duration
 	SummaryInterval   time.Duration
 	Watchdog          time.Duration
 }
@@ -74,6 +76,7 @@ func DefaultConfig() Config {
 		ReconcileInterval: time.Second,
 		Kick:              true,
 		LogLevel:          slog.LevelInfo,
+		LogMaxAge:         7 * 24 * time.Hour,
 		SummaryInterval:   10 * time.Minute,
 		Watchdog:          15 * time.Second,
 	}
@@ -111,7 +114,7 @@ func (c *Config) attrs() []any {
 		"persist", c.Persist, "cooldown", c.Cooldown, "wait_to_restore", c.WaitToRestore,
 		"outage_epsilon", c.OutageEpsilon, "reconcile_interval", c.ReconcileInterval,
 		"kick", c.Kick, "nft_table", c.NftTable, "dry_run", c.DryRun, "log_level", c.LogLevel.String(),
-		"summary_interval", c.SummaryInterval, "watchdog", c.Watchdog,
+		"log_dir", c.LogDir, "log_max_age", c.LogMaxAge, "summary_interval", c.SummaryInterval, "watchdog", c.Watchdog,
 	}
 }
 
@@ -156,6 +159,8 @@ func ParseFlags(args []string, defaults Config, output io.Writer) (Config, error
 	fs.StringVar(&c.NftTable, "nft-table", "", "daemon-owned inet table (default wgsteer_<device>)")
 	fs.BoolVar(&c.DryRun, "dry-run", c.DryRun, "probe, score and log decisions; never touch the device or nftables")
 	fs.StringVar(&logLevel, "log-level", c.LogLevel.String(), "log level: debug, info, warn, error")
+	fs.StringVar(&c.LogDir, "log-dir", c.LogDir, "write the log to hourly gzip files wgsteer-YYYY-MM-DDTHH.log.gz (UTC) in this directory instead of stderr")
+	fs.DurationVar(&c.LogMaxAge, "log-max-age", c.LogMaxAge, "with --log-dir, delete files of hours that ended longer ago than this (at least 1h)")
 	fs.DurationVar(&c.SummaryInterval, "summary-interval", c.SummaryInterval, "periodic per-endpoint summary (0 disables)")
 	fs.DurationVar(&c.Watchdog, "watchdog", c.Watchdog, "exit if the event loop stalls this long")
 	showVersion := fs.Bool("version", false, "print the version and exit")
@@ -219,6 +224,7 @@ func (c *Config) validate() error {
 	check(c.ReconcileInterval > 0, "--reconcile-interval must be positive")
 	check(c.Watchdog >= 2*max(c.ProbeInterval, c.ReconcileInterval), "--watchdog must be at least twice the probe and reconcile intervals")
 	check(c.SummaryInterval >= 0, "--summary-interval must not be negative")
+	check(c.LogMaxAge >= time.Hour, "--log-max-age must be at least 1h")
 	check(c.NftTable != "" && len(c.NftTable) < 256, "--nft-table must be 1-255 bytes")
 	if err := c.Params().Validate(); err != nil {
 		errs = append(errs, err)

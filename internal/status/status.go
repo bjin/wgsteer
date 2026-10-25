@@ -104,7 +104,10 @@ type Selection struct {
 	// endpoint, or a reload removed it).
 	Endpoint netip.AddrPort `json:"endpoint,omitzero"`
 	// Index is Endpoint's list position, −1 without a selection.
-	Index int       `json:"index"`
+	Index int `json:"index"`
+	// Name is Endpoint's display name (configured name, or Index in
+	// decimal); empty without a selection.
+	Name  string    `json:"name,omitempty"`
 	Since time.Time `json:"since"`
 	// Reason says how the selection was made.
 	Reason string `json:"reason"`
@@ -160,10 +163,12 @@ type Probe struct {
 	TxBytes uint64 `json:"tx_bytes"`
 }
 
-// Slot is one probe slot.
+// Slot is one probe slot. Name is the endpoint's display name while it is
+// listed (a slot may straddle a reload).
 type Slot struct {
 	Endpoint netip.AddrPort `json:"endpoint"`
 	Index    int            `json:"index"`
+	Name     string         `json:"name,omitempty"`
 	Seq      uint16         `json:"seq"`
 	Start    time.Time      `json:"start"`
 	Valid    bool           `json:"valid"`

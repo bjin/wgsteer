@@ -47,16 +47,16 @@ func (s *Status) Lines() []string {
 	}
 
 	sel := s.Selection
-	idx := ""
+	selected := ep(sel.Endpoint)
 	if sel.Index >= 0 {
-		idx = fmt.Sprintf(" #%d", sel.Index)
+		selected = "#" + sel.Name + " " + selected
 	}
 	verified := "n/a"
 	if sel.Verified != nil {
 		verified = fmt.Sprint(*sel.Verified)
 	}
-	add("selection: %s%s since %s (%s) reason=%s cooldown_left=%s aliases=%s verified=%s",
-		ep(sel.Endpoint), idx, clock(sel.Since), dur(s.At.Sub(sel.Since)), clean(sel.Reason), dur(sel.CooldownLeft), eps(sel.Aliases), verified)
+	add("selection: %s since %s (%s) reason=%s cooldown_left=%s aliases=%s verified=%s",
+		selected, clock(sel.Since), dur(s.At.Sub(sel.Since)), clean(sel.Reason), dur(sel.CooldownLeft), eps(sel.Aliases), verified)
 	if sel.Removed.IsValid() {
 		add("selection: removed by reload %s", ep(sel.Removed))
 	}
@@ -90,7 +90,11 @@ func (s *Status) Lines() []string {
 		if p.Slot.Pending {
 			state = "pending"
 		}
-		slot = fmt.Sprintf("#%d %s seq=%d %s valid=%t", p.Slot.Index, ep(p.Slot.Endpoint), p.Slot.Seq, state, p.Slot.Valid)
+		name := p.Slot.Name
+		if name == "" {
+			name = "unlisted"
+		}
+		slot = fmt.Sprintf("#%s %s seq=%d %s valid=%t", name, ep(p.Slot.Endpoint), p.Slot.Seq, state, p.Slot.Valid)
 	}
 	add("probe: public_key=%s addr=%s target=%s listen_port=%d fwmark=%s session=%s slot=%s",
 		p.PublicKey, p.ProbeAddr, p.Target, p.ListenPort, mark(p.Fwmark), sess, slot)
@@ -122,7 +126,7 @@ func (s *Status) Lines() []string {
 func (s *Status) endpointTable() []string {
 	var b bytes.Buffer
 	tw := tabwriter.NewWriter(&b, 0, 0, 1, ' ', 0)
-	fmt.Fprintln(tw, "endpoints:\t#\tendpoint\tfamily\tsel\tsamples\tinvalid\tloss±se\tlatency±se ms\trtt mean/std ms\tcost\tbiased\tG\teligible\tfresh\trun\tlevel\tlast sample\tdenied")
+	fmt.Fprintln(tw, "endpoints:\t#\tname\tendpoint\tfamily\tsel\tsamples\tinvalid\tloss±se\tlatency±se ms\trtt mean/std ms\tcost\tbiased\tG\teligible\tfresh\trun\tlevel\tlast sample\tdenied")
 	for _, e := range s.Endpoints {
 		sel := ""
 		if e.Active {
@@ -144,8 +148,8 @@ func (s *Status) endpointTable() []string {
 		if e.Denied {
 			deny = fmt.Sprintf("%d pkts", e.DenyPackets)
 		}
-		fmt.Fprintf(tw, "endpoints:\t%d\t%s\t%s\t%s\t%d\t%d\t%s±%s\t%s±%s\t%s/%s\t%s\t%s\t%s\t%t\t%t\t%d\t%d\t%s\t%s\n",
-			e.Index, ep(e.Addr), e.Family, sel, e.Samples, e.Invalid,
+		fmt.Fprintf(tw, "endpoints:\t%d\t%s\t%s\t%s\t%s\t%d\t%d\t%s±%s\t%s±%s\t%s/%s\t%s\t%s\t%s\t%t\t%t\t%d\t%d\t%s\t%s\n",
+			e.Index, e.Name, ep(e.Addr), e.Family, sel, e.Samples, e.Invalid,
 			pct(float64(e.Loss)), pct(float64(e.LossSE)),
 			num(float64(e.Latency), 1), num(float64(e.LatencySE), 1),
 			num(float64(e.RTTMean), 1), num(float64(e.RTTStd), 1),

@@ -88,7 +88,7 @@ func (d *daemon) trace(dec policy.Decision) {
 
 // endpointAttrs renders one endpoint view of a decision record.
 func endpointAttrs(v policy.EndpointView) []any {
-	a := []any{"endpoint", v.Addr, "index", v.Index, "active", v.Active, "samples", v.Samples, "replies", v.Replies,
+	a := []any{"endpoint", v.Addr, "index", v.Index, "name", v.Name, "active", v.Active, "samples", v.Samples, "replies", v.Replies,
 		"invalid", v.Invalid, "loss", round(float64(v.Loss)), "loss_se", round(float64(v.LossSE)),
 		"latency_ms", round(float64(v.Latency)), "latency_se_ms", round(float64(v.LatencySE)),
 		"rtt_mean_ms", round(float64(v.RTTMean)), "rtt_std_ms", round(float64(v.RTTStd)),
@@ -125,7 +125,7 @@ func ruleAttrs(r policy.RuleState) []any {
 func (d *daemon) summary() {
 	s := d.snap.Load()
 	for _, e := range s.Endpoints {
-		d.log.Info("summary", "endpoint", e.Addr, "index", e.Index, "selected", e.Active,
+		d.log.Info("summary", "endpoint", e.Addr, "index", e.Index, "name", e.Name, "selected", e.Active,
 			"loss", round(float64(e.Loss)), "rtt_mean_ms", round(float64(e.RTTMean)), "rtt_std_ms", round(float64(e.RTTStd)),
 			"cost", round(float64(e.Cost)), "valid", e.Samples, "invalid", e.Invalid,
 			"eligible", e.Eligible, "fresh", e.Fresh, "deny_packets", e.DenyPackets)

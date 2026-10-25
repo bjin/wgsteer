@@ -98,10 +98,12 @@ type Record struct {
 
 // EndpointView is one endpoint's estimate and rule inputs. Latency values are
 // milliseconds; Cost is the unbiased cost (latency term × loss factor) and
-// BiasedCost includes the order bias (1+β·Index).
+// BiasedCost includes the order bias (1+β·Index). Name is the display name:
+// the configured name, or Index in decimal.
 type EndpointView struct {
 	Addr      netip.AddrPort `json:"addr"`
 	Index     int            `json:"index"`
+	Name      string         `json:"name"`
 	Active    bool           `json:"active"`
 	Samples   int            `json:"samples"`
 	Replies   int            `json:"replies"`

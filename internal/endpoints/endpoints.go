@@ -1,9 +1,10 @@
 // Package endpoints parses and normalizes the candidate endpoint list.
 //
 // The list has one literal endpoint per line: a.b.c.d:port for IPv4 and
-// [addr]:port for IPv6. Blank lines and '#' comments are allowed. Earlier
-// lines are preferred. Endpoints are always compared as normalized
-// netip.AddrPort values, never as strings.
+// [addr]:port for IPv6. Blank lines and '#' comments are allowed; a comment
+// after an endpoint on the same line names it. Earlier lines are preferred.
+// Endpoints are always compared as normalized netip.AddrPort values, never
+// as strings.
 package endpoints
 
 import (
@@ -14,23 +15,67 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 )
 
+// MaxNameLen is the longest endpoint name in bytes.
+const MaxNameLen = 32
+
+// Endpoint is one entry of the list.
+type Endpoint struct {
+	Addr netip.AddrPort
+	// Name is the configured name, empty when the line has none.
+	Name string
+}
+
+// DisplayName is the name an endpoint is shown with: its configured name,
+// or its list index in decimal when it has none. Configured names are never
+// all digits, so the two cannot collide.
+func DisplayName(name string, index int) string {
+	if name != "" {
+		return name
+	}
+	return strconv.Itoa(index)
+}
+
+// Label renders an endpoint reference in messages: "#" + DisplayName.
+func Label(name string, index int) string {
+	return "#" + DisplayName(name, index)
+}
+
+// Addrs returns the addresses of list in order.
+func Addrs(list []Endpoint) []netip.AddrPort {
+	out := make([]netip.AddrPort, len(list))
+	for i, e := range list {
+		out[i] = e.Addr
+	}
+	return out
+}
+
+// Unnamed returns addrs as entries without names.
+func Unnamed(addrs []netip.AddrPort) []Endpoint {
+	out := make([]Endpoint, len(addrs))
+	for i, a := range addrs {
+		out[i] = Endpoint{Addr: a}
+	}
+	return out
+}
+
 // Parse reads an endpoint list and returns the normalized endpoints in file
-// order. Any invalid line or duplicate (after normalization) is an error that
-// names the line.
-func Parse(r io.Reader) ([]netip.AddrPort, error) {
-	var list []netip.AddrPort
+// order. A '#' comment after an endpoint names it (the comment trimmed of
+// surrounding whitespace; empty means unnamed). Any invalid line, invalid
+// name, duplicate endpoint (after normalization) or duplicate name is an
+// error that names the line.
+func Parse(r io.Reader) ([]Endpoint, error) {
+	var list []Endpoint
 	seen := make(map[netip.AddrPort]int)
+	names := make(map[string]int)
 	sc := bufio.NewScanner(r)
 	lineNo := 0
 	for sc.Scan() {
 		lineNo++
-		line := sc.Text()
-		if i := strings.IndexByte(line, '#'); i >= 0 {
-			line = line[:i]
-		}
+		line, comment, _ := strings.Cut(sc.Text(), "#")
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -43,7 +88,17 @@ func Parse(r io.Reader) ([]netip.AddrPort, error) {
 			return nil, fmt.Errorf("line %d: duplicate endpoint %s (first on line %d)", lineNo, ap, prev)
 		}
 		seen[ap] = lineNo
-		list = append(list, ap)
+		name := strings.TrimSpace(comment)
+		if name != "" {
+			if err := checkName(name); err != nil {
+				return nil, fmt.Errorf("line %d: %w", lineNo, err)
+			}
+			if prev, ok := names[name]; ok {
+				return nil, fmt.Errorf("line %d: duplicate endpoint name %q (first on line %d)", lineNo, name, prev)
+			}
+			names[name] = lineNo
+		}
+		list = append(list, Endpoint{Addr: ap, Name: name})
 	}
 	if err := sc.Err(); err != nil {
 		return nil, fmt.Errorf("read endpoint list: %w", err)
@@ -51,8 +106,31 @@ func Parse(r io.Reader) ([]netip.AddrPort, error) {
 	return list, nil
 }
 
+// checkName validates a configured name: 1-MaxNameLen bytes of
+// [A-Za-z0-9._-], not all digits (digit-only names are the unnamed default).
+func checkName(name string) error {
+	if len(name) > MaxNameLen {
+		return fmt.Errorf("invalid endpoint name %q: longer than %d bytes", name, MaxNameLen)
+	}
+	digits := true
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c >= '0' && c <= '9':
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c == '.', c == '_', c == '-':
+			digits = false
+		default:
+			return fmt.Errorf("invalid endpoint name %q: only letters, digits, '.', '_' and '-' are allowed", name)
+		}
+	}
+	if digits {
+		return fmt.Errorf("invalid endpoint name %q: all digits (reserved for unnamed endpoints)", name)
+	}
+	return nil
+}
+
 // Load reads and parses an endpoint list file. An empty list is an error.
-func Load(path string) ([]netip.AddrPort, error) {
+func Load(path string) ([]Endpoint, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, fmt.Errorf("open endpoint list: %w", err)

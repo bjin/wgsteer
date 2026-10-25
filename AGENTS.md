@@ -14,7 +14,7 @@ Go daemon that keeps one WireGuard client peer on the best of several equivalent
 | `go test -c -o .nftable.test ./internal/nftable && unshare -rn ./.nftable.test -test.v` | Privileged nft tests alone (same for `internal/wgdev`) |
 | `python3 tests/integration/test_topology.py -v` | Namespace harness self-test (no daemon) |
 | `python3 tests/integration/test_daemon.py -v` | Daemon scenarios in the namespace topology; run `make build` first |
-| `python3 tools/tune.py --data DIR extract LOGDIR`, then `verify`, `paths`, `replay`/`faults`/`sim -- FLAGS`, `tune` | Offline analysis and flag tuning on a recorded debug dry-run ([docs/scoring.md](docs/scoring.md#tuning-on-recorded-data)); builds `cmd/wgsteer-replay` and the policy test binary into `DIR` |
+| `python3 tools/tune.py --data DIR extract [--since T] [--until T] LOGDIR` (a copy of the daemon's `--log-dir`), then `verify`, `paths`, `replay`/`faults`/`sim -- FLAGS`, `tune` | Offline analysis and flag tuning on a recorded debug dry-run ([docs/scoring.md](docs/scoring.md#tuning-on-recorded-data)); builds `cmd/wgsteer-replay` and the policy test binary into `DIR` |
 
 CI (`.github/workflows/ci.yml`): `make test`, `make build` and `make integration` natively on linux/amd64 and linux/arm64 (Ubuntu 26.04) for pushes to `master` and pull requests; a `v*` tag runs `make test`, then builds release tarballs for `amd64`, `arm64` and `mips64` and publishes them as a GitHub pre-release ([docs/testing.md](docs/testing.md#ci)). 32-bit targets do not compile with the pinned nftables ([docs/caveats.md](docs/caveats.md#no-32-bit-builds)).
 
@@ -25,7 +25,7 @@ Test layout, host requirements and quirks: [docs/testing.md](docs/testing.md).
 - `gofmt`, tabs; never reformat unrelated code.
 - Wrap errors with `fmt.Errorf("...: %w", err)`; check with `errors.Is`/`errors.As`.
 - `snake_case` file names; acronyms keep their case (`UDPAddr`, `RTT`, `ID`, `NFT`).
-- Logging: stdlib `log/slog` only, stable message strings and `key=value` attributes. Never log private or preshared keys (the probe's `IpcGet`/`UAPI` text contains the private key). Log strings and keys are documented in [docs/observability.md](docs/observability.md); update it when they change.
+- Logging: stdlib `log/slog` only, stable message strings and `key=value` attributes. Never log private or preshared keys (the probe's `IpcGet`/`UAPI` text contains the private key). Log strings and keys are documented in [docs/observability.md](docs/observability.md); update it when they change. Readers parse them: keep the key order of `sample` and `trace decision` (`tools/tune.py` matches them positionally) and the per-tick `trace endpoint` rows (index 0 up, with `endpoint`, `name`, `active`) right before `trace decision` (it resumes runs from them), keep `name` right after `index` in endpoint records, and refer to endpoints by label (`endpoints.Label`: `#name`, or `#index` when unnamed), never by bare index; an external status tool reads the `--log-dir` files.
 - Imports grouped: stdlib, third-party, this module.
 - No CGO. Do not run `go mod tidy` or change dependency versions (`github.com/google/nftables` must stay at a master version with `TableFlagOwner`/`AsLasting`; v0.3.0 cannot create owner tables).
 - Tests are deterministic and test behavior and boundaries; privileged tests skip with a clear message outside a user+network namespace with `CAP_NET_ADMIN`.

@@ -21,13 +21,13 @@ func sample() *Status {
 		At:     at,
 		Daemon: Daemon{Version: "v1", Revision: "abc", StartTime: at.Add(-time.Hour), State: StateRunning},
 		Device: Device{Name: "wg0", Present: true, Type: "kernel", Endpoint: a, Listed: true},
-		Selection: Selection{Endpoint: a, Index: 0, Since: at.Add(-time.Minute), Reason: `adopted "quoted"`,
+		Selection: Selection{Endpoint: a, Index: 0, Name: "us", Since: at.Add(-time.Minute), Reason: `adopted "quoted"`,
 			Rules:    []policy.RuleState{{Rule: policy.RuleDegrade, Value: time.Second, Hold: time.Minute}},
 			Decision: Decision{Blocker: policy.BlockerNothingBetter, Reason: "nothing better\nbeyond noise"}},
 		Endpoints: []Endpoint{
-			{EndpointView: policy.EndpointView{Addr: a, Index: 0, Active: true, Samples: 20, Loss: 0.05, Cost: 150,
+			{EndpointView: policy.EndpointView{Addr: a, Index: 0, Name: "us", Active: true, Samples: 20, Loss: 0.05, Cost: 150,
 				Last: &stats.Sample{At: at.Add(-time.Second), Replied: true, RTT: 150 * time.Millisecond}}, Family: "ipv4"},
-			{EndpointView: policy.EndpointView{Addr: b, Index: 1, Loss: 1, Cost: inf, BiasedCost: inf, Latency: inf,
+			{EndpointView: policy.EndpointView{Addr: b, Index: 1, Name: "1", Loss: 1, Cost: inf, BiasedCost: inf, Latency: inf,
 				Gate: &policy.Gated{G: 0, RLat: policy.Float(math.Inf(-1))}}, Family: "ipv6", Denied: true, DenyPackets: 7},
 		},
 		NFT:     NFT{Enabled: true, Table: "wgsteer_wg0", Denied: []Counter{{Endpoint: b, Packets: 7}}},
@@ -57,7 +57,7 @@ func TestLinesOneRowPerRecord(t *testing.T) {
 			t.Errorf("row %q contains a quote or newline", l)
 		}
 	}
-	for _, want := range []string{"10.0.0.1:4000", "[fd00::2]:4000", "inf", "7 pkts", "nothing-better", "history: #1"} {
+	for _, want := range []string{"selection: #us 10.0.0.1:4000 ", "[fd00::2]:4000", "inf", "7 pkts", "nothing-better", "history: #1"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("rendering lacks %q:\n%s", want, text)
 		}

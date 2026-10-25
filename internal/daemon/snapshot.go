@@ -87,6 +87,9 @@ func (d *daemon) snapshot() *status.Status {
 		sel := d.eng.Selected()
 		s.Selection.Endpoint = sel
 		s.Selection.Index = endpoints.Index(d.list, sel)
+		if s.Selection.Index >= 0 {
+			s.Selection.Name = d.displayName(s.Selection.Index)
+		}
 		s.Selection.Since = d.wallAt(d.selSince)
 	}
 	var rec policy.Record
@@ -129,6 +132,10 @@ func (d *daemon) snapshot() *status.Status {
 		_, pending := d.sched.Pending()
 		s.Probe.Slot = &status.Slot{Endpoint: d.slot.Endpoint, Index: d.slot.Index, Seq: d.slot.Seq,
 			Start: d.wallAt(d.slot.Start), Valid: d.slot.Valid, Pending: pending}
+		// The slot may predate a reload: name it only while still listed.
+		if i := endpoints.Index(d.list, d.slot.Endpoint); i >= 0 {
+			s.Probe.Slot.Name = d.displayName(i)
+		}
 	}
 
 	// nft.
@@ -157,7 +164,7 @@ func (d *daemon) snapshot() *status.Status {
 	views := rec.Endpoints
 	if views == nil {
 		for i, a := range d.list {
-			views = append(views, policy.EndpointView{Addr: a, Index: i})
+			views = append(views, policy.EndpointView{Addr: a, Index: i, Name: d.displayName(i)})
 		}
 	}
 	for _, v := range views {

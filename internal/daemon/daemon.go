@@ -79,7 +79,8 @@ type daemon struct {
 	prb Prober
 
 	ident *probecfg.Config
-	list  []netip.AddrPort
+	eps   []endpoints.Endpoint // the parsed list, with names
+	list  []netip.AddrPort     // addresses of eps
 	eng   *policy.Engine
 	sched *probe.Scheduler
 
@@ -160,8 +161,9 @@ func newDaemon(cfg Config, logging *Logging, clock Clock, wall func() time.Time,
 }
 
 // Run starts the daemon and runs it until SIGTERM or SIGINT. It returns nil
-// after a clean stop and a *StartupError if startup failed. A stalled loop
-// exits the process with code 3 through the watchdog.
+// after a clean stop and a *StartupError if startup failed; the caller then
+// closes logging. A stalled loop exits the process with code 3 through the
+// watchdog, which closes logging on a best-effort basis first.
 func Run(cfg Config, logging *Logging) error {
 	sigs := make(chan os.Signal, 16)
 	signal.Notify(sigs, syscall.SIGHUP, syscall.SIGUSR1, syscall.SIGUSR2, syscall.SIGTERM, syscall.SIGINT)
@@ -170,7 +172,7 @@ func Run(cfg Config, logging *Logging) error {
 	hb := NewHeartbeat(time.Now())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	wd := &Watchdog{Heartbeat: hb, Limit: cfg.Watchdog, Now: time.Now, Exit: os.Exit, Logger: logging.Logger}
+	wd := &Watchdog{Heartbeat: hb, Limit: cfg.Watchdog, Now: time.Now, Exit: os.Exit, Logger: logging.Logger, Flush: logging.Close}
 	go wd.Run(ctx)
 
 	d := newDaemon(cfg, logging, bootClock{}, time.Now, hb, deps{})
@@ -216,7 +218,7 @@ func (d *daemon) loadInputs() error {
 	if err != nil {
 		return d.fail("endpoints", err)
 	}
-	d.list = list
+	d.setList(list)
 	d.logEndpoints()
 	ident, err := probecfg.Load(d.cfg.ProbeConfig)
 	if err != nil {
@@ -232,9 +234,19 @@ func (d *daemon) loadInputs() error {
 	return nil
 }
 
+// setList adopts a parsed endpoint list.
+func (d *daemon) setList(list []endpoints.Endpoint) {
+	d.eps, d.list = list, endpoints.Addrs(list)
+}
+
+// displayName is the display name of list position i (endpoints.DisplayName).
+func (d *daemon) displayName(i int) string {
+	return endpoints.DisplayName(d.eps[i].Name, i)
+}
+
 func (d *daemon) logEndpoints() {
 	for i, ep := range d.list {
-		d.log.Info("endpoint", "index", i, "endpoint", ep, "family", endpoints.Family(ep))
+		d.log.Info("endpoint", "index", i, "name", d.displayName(i), "endpoint", ep, "family", endpoints.Family(ep))
 	}
 }
 
@@ -296,7 +308,7 @@ func (d *daemon) waitDevice(sigs <-chan os.Signal) (dev *wgdev.Device, peer wgde
 				if list, err := endpoints.Load(d.cfg.Endpoints); err != nil {
 					d.log.Error("reload failed", "error", err)
 				} else {
-					d.list = list
+					d.setList(list)
 					d.log.Info("endpoints reloaded", "endpoints", len(list))
 					d.logEndpoints()
 				}
@@ -325,15 +337,19 @@ func (d *daemon) setup(dev *wgdev.Device, peer wgdev.Peer) error {
 	var sel netip.AddrPort
 	if i := endpoints.Index(d.list, peer.Endpoint); i >= 0 {
 		sel = d.list[i]
-		d.selReason = fmt.Sprintf("device endpoint is listed (#%d)", i)
+		d.selReason = "device endpoint is listed (" + endpoints.Label(d.eps[i].Name, i) + ")"
 	} else if peer.Endpoint.IsValid() {
 		d.aliases = []netip.AddrPort{peer.Endpoint}
 		d.selReason = "device endpoint is unlisted; all listed candidates denied until the startup switch"
 	} else {
 		d.selReason = "device peer has no endpoint; all listed candidates denied until the startup switch"
 	}
-	d.log.Info("initial selection", "selection", epAttr(sel), "index", endpoints.Index(d.list, sel), "reason", d.selReason)
-	eng, err := policy.New(d.cfg.Params(), d.list, sel, now)
+	selAttrs := []any{"selection", epAttr(sel), "index", -1}
+	if i := endpoints.Index(d.list, sel); i >= 0 {
+		selAttrs = []any{"selection", epAttr(sel), "index", i, "name", d.displayName(i)}
+	}
+	d.log.Info("initial selection", append(selAttrs, "reason", d.selReason)...)
+	eng, err := policy.New(d.cfg.Params(), d.eps, sel, now)
 	if err != nil {
 		return d.fail("policy", err)
 	}

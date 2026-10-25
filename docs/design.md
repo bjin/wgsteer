@@ -34,7 +34,7 @@ flowchart LR
 |---|---|
 | `cmd/wgsteer` | Flag parsing via `daemon.ParseFlags`, exit codes |
 | `cmd/wgsteer-replay` | Replays recorded probe samples through `internal/policy` with any flags, endpoint subset and synthetic faults; the engine behind `tools/tune.py` ([scoring.md](scoring.md#tuning-on-recorded-data)) |
-| `internal/endpoints` | Endpoint list parsing and normalization (`netip.AddrPort`, unmapped, no zones) |
+| `internal/endpoints` | Endpoint list parsing (with `# name` comments) and normalization (`netip.AddrPort`, unmapped, no zones); display names and labels |
 | `internal/probecfg` | Probe identity (xplatform UAPI `set` format), validation, the creating `IpcSet` text |
 | `internal/probe` | wireguard-go device over a channel TUN, ICMP/ICMPv6 echo, the probe's own UDP bind, slot scheduler, session validity |
 | `internal/stats` | Per-endpoint sample ring and the recency-weighted estimator |
@@ -42,6 +42,7 @@ flowchart LR
 | `internal/wgdev` | wgctrl wrapper: read the device, set the endpoint with `UpdateOnly`, kick |
 | `internal/nftable` | Owner-flag table on one lasting netlink connection, atomic chain rebuilds, counters, read-back |
 | `internal/status` | Immutable, JSON-tagged status snapshot and its text rendering |
+| `internal/logfile` | `--log-dir` writer: hourly gzip files (a new `_N` file per restart, never appending), sync flush after 10 s, retention, per-file `config` header hook |
 | `internal/daemon` | Event loop, lifecycle, reconcile, switch procedure, logging, watchdog |
 
 ## Single event loop
@@ -96,11 +97,11 @@ Every failed step logs `startup failed` with `step` (`privileges`, `endpoints`, 
 
 **Unexpected exit (SIGKILL, panic, OOM):** the kernel removes the owner-flag table with the process's netlink socket. The device keeps its endpoint and roams like plain WireGuard until the service manager restarts the daemon.
 
-**Hang:** the watchdog goroutine checks the heartbeat every `--watchdog`/4 (at least 10 ms). If the last beat is older than `--watchdog`, it logs `watchdog: event loop stalled, exiting` with all goroutine stacks and exits 3. The report is best-effort: the loop may be stalled on the same blocked stderr, so the exit waits at most 1 s for it. The exit closes the socket, which removes the table.
+**Hang:** the watchdog goroutine checks the heartbeat every `--watchdog`/4 (at least 10 ms). If the last beat is older than `--watchdog`, it logs `watchdog: event loop stalled, exiting` with all goroutine stacks and exits 3. The report is best-effort: the loop may be stalled on the same blocked stderr, so the exit waits at most 1 s for it and, with `--log-dir`, for finishing the log file after it (the loop may be stalled inside the log writer). The exit closes the socket, which removes the table.
 
 **Detached:** when a reconcile read fails or the device/peer is gone, the daemon keeps probing and scoring, leaves nft alone, and defers proposed switches (no commit). On reattach it re-validates, marks the rules dirty and re-applies them on the same reconcile tick; a deferred switch runs on the next tick.
 
-**Reload (`SIGHUP`):** re-read the endpoint list only (a probe-config change needs a restart). Endpoints still listed keep their history, accumulators and restore level; new ones start empty; list position (order bias) follows the new file. The deny-list is rebuilt and a tick runs at once; if the selection was removed, that tick proposes a `reload` switch that ignores the cooldown. A list that fails to parse is rejected and the old list kept.
+**Reload (`SIGHUP`):** re-read the endpoint list only (a probe-config change needs a restart). Endpoints still listed keep their history, accumulators and restore level; new ones start empty; list position (order bias) and endpoint names follow the new file. The deny-list is rebuilt and a tick runs at once; if the selection was removed, that tick proposes a `reload` switch that ignores the cooldown. A list that fails to parse is rejected and the old list kept.
 
 ## Dry-run
 
@@ -128,15 +129,15 @@ wgsteer needs exactly one capability, `CAP_NET_ADMIN`, and runs fine as a non-ro
 - Capabilities are checked in the user namespace that owns the device's network namespace. `CAP_NET_ADMIN` held only in a child user namespace (some rootless containers) shows up as effective but every netlink call fails with `EPERM`; the startup error says so.
 - `CAP_NET_ADMIN` is still full network control, including reading the live device's private key through genetlink. Running as a non-root user removes filesystem, process and module powers, not network ones.
 - **Userspace devices (wireguard-go):** wgctrl talks to `/var/run/wireguard/<dev>.sock`, which wireguard-go creates as `srwx------` for its own uid. That is a file permission, not a capability: run wgsteer as the same uid as wireguard-go (`CAP_DAC_OVERRIDE` would also pass, but is not worth granting). The socket cannot be opened up afterwards: wireguard-go watches it with inotify and shuts down on any attribute change, so a `chmod`/`chown` kills the device. A daemon that cannot write the socket fails with `connect: permission denied` plus a hint. Kernel devices have no such constraint.
-- Files: the service user must read the probe config (it holds a private key: `0640 root:wgsteer`) and the endpoint list (re-read on `SIGHUP`). The daemon writes no files.
+- Files: the service user must read the probe config (it holds a private key: `0640 root:wgsteer`) and the endpoint list (re-read on `SIGHUP`). The daemon writes files only with `--log-dir`, and only there: it creates the directory (0750) if missing, writes `wgsteer-*.log.gz` files (0640) and deletes its own expired ones. Without `--log-dir` it writes no files.
 
 **Service managers**
 
 - **systemd:** `User=wgsteer`, `AmbientCapabilities=CAP_NET_ADMIN`, `CapabilityBoundingSet=CAP_NET_ADMIN`, `NoNewPrivileges=yes` (the [README](../README.md#systemd) unit; the same set the measurement above used).
 - **OpenWrt procd:** `procd_set_param user` alone is not enough: without a jail procd drops to the user with plain `setgid`/`setuid`, which clears every capability, and the daemon fails at the `privileges` step. Capabilities are applied only through ujail ([procd `service/instance.c`](https://github.com/openwrt/procd/blob/master/service/instance.c)). Two options:
-  - ujail (package `procd-ujail`): `procd_add_jail wgsteer`, `procd_set_param capabilities /etc/capabilities/wgsteer.json` (`CAP_NET_ADMIN` in `bounding`, `effective`, `permitted`, `inheritable` and `ambient`), `procd_set_param user wgsteer`, `procd_set_param group wgsteer`, `procd_set_param no_new_privs 1`. The jail must stay in the host network namespace and mount the probe config and endpoint list read-only.
+  - ujail (package `procd-ujail`): `procd_add_jail wgsteer`, `procd_set_param capabilities /etc/capabilities/wgsteer.json` (`CAP_NET_ADMIN` in `bounding`, `effective`, `permitted`, `inheritable` and `ambient`), `procd_set_param user wgsteer`, `procd_set_param group wgsteer`, `procd_set_param no_new_privs 1`. The jail must stay in the host network namespace (it may have its own mount and pid namespaces).
   - File capability: `setcap cap_net_admin=ep` on the binary (mode `0750 root:wgsteer`) plus `procd_set_param user`, without `no_new_privs` (it blocks file capabilities). Needs `setcap` at install time and xattr support on the filesystem holding the binary.
-  - Not verified on a router yet: whether the image ships `/sbin/ujail`, the jail mounts the binary needs, and xattr support of the overlay.
+  - Jail layout for the production command line (`--probe-config /etc/wgsteer/probe.conf --endpoints /etc/wgsteer/wg-endpoints --log-dir /var/log/wgsteer`): the binary (static, `CGO_ENABLED=0`: no libraries or loader), `/etc/wgsteer` as a read-only *directory* mount and `/var/log/wgsteer` read-write (tmpfs on OpenWrt). Mount the directory, not the two files: a bind mount of a single file pins its inode, so an endpoint list replaced atomically (written to a temporary file, then renamed over the old one) would stay invisible to `SIGHUP`; through a directory mount the reload sees the new file. A kernel device needs no other file (a userspace device needs wireguard-go's socket, see above). Without `/proc` the `privileges` record cannot tell `all` from a long list (it reads `/proc/sys/kernel/cap_last_cap` only for that) and the check itself uses `capget`. Without `/etc/localtime` and `TZ` in the jail, record timestamps are UTC (file names are UTC anyway).
 
 ## Clocks
 

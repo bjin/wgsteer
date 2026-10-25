@@ -17,6 +17,7 @@ import (
 type endpointState struct {
 	addr        netip.AddrPort
 	index       int
+	name        string // configured name, empty when unnamed
 	ring        *stats.Ring
 	invalid     int
 	lastInvalid time.Time
@@ -61,8 +62,9 @@ type Engine struct {
 // New creates an engine for list. selected is the live device's endpoint if
 // it is listed, or the zero value when the device is on an unlisted
 // endpoint (rule 5 then switches to the best candidate once one is
-// eligible). now is the daemon start; the cooldown also runs from it.
-func New(p Params, list []netip.AddrPort, selected netip.AddrPort, now time.Time) (*Engine, error) {
+// eligible). now is the daemon start; the cooldown also runs from it. Names
+// label the endpoints in reasons and views.
+func New(p Params, list []endpoints.Endpoint, selected netip.AddrPort, now time.Time) (*Engine, error) {
 	if err := p.Validate(); err != nil {
 		return nil, fmt.Errorf("policy parameters: %w", err)
 	}
@@ -82,10 +84,10 @@ func New(p Params, list []netip.AddrPort, selected netip.AddrPort, now time.Time
 		lastSwitch: now,
 		lastTick:   now,
 	}
-	for i, ap := range norm {
-		s := &endpointState{addr: ap, index: i, ring: stats.NewRing(p.History)}
+	for i, ep := range norm {
+		s := &endpointState{addr: ep.Addr, index: i, name: ep.Name, ring: stats.NewRing(p.History)}
 		e.list = append(e.list, s)
-		e.byAddr[ap] = s
+		e.byAddr[ep.Addr] = s
 	}
 	if selected.IsValid() {
 		s := e.byAddr[endpoints.Normalize(selected)]
@@ -97,22 +99,22 @@ func New(p Params, list []netip.AddrPort, selected netip.AddrPort, now time.Time
 	return e, nil
 }
 
-func normalizeList(list []netip.AddrPort) ([]netip.AddrPort, error) {
+func normalizeList(list []endpoints.Endpoint) ([]endpoints.Endpoint, error) {
 	if len(list) == 0 {
 		return nil, errors.New("endpoint list is empty")
 	}
-	out := make([]netip.AddrPort, len(list))
+	out := make([]endpoints.Endpoint, len(list))
 	seen := make(map[netip.AddrPort]bool, len(list))
-	for i, ap := range list {
-		n := endpoints.Normalize(ap)
+	for i, ep := range list {
+		n := endpoints.Normalize(ep.Addr)
 		if !n.IsValid() {
-			return nil, fmt.Errorf("endpoint #%d is invalid", i)
+			return nil, fmt.Errorf("endpoint %s is invalid", endpoints.Label(ep.Name, i))
 		}
 		if seen[n] {
 			return nil, fmt.Errorf("duplicate endpoint %v", n)
 		}
 		seen[n] = true
-		out[i] = n
+		out[i] = endpoints.Endpoint{Addr: n, Name: ep.Name}
 	}
 	return out, nil
 }
@@ -167,25 +169,25 @@ func (e *Engine) RecordInvalid(ep netip.AddrPort, at time.Time) {
 
 // Reload replaces the endpoint list (rule 6). Endpoints still
 // listed keep their history, counters, restore level and accumulators; new
-// ones start empty; removed ones are dropped. Order bias follows the new
-// order. If the selection was removed, the next Tick proposes a reload switch
+// ones start empty; removed ones are dropped. Order bias and names follow
+// the new list. If the selection was removed, the next Tick proposes a reload switch
 // to the best eligible-or-fresh candidate, ignoring the cooldown. On error
 // the engine is unchanged.
-func (e *Engine) Reload(list []netip.AddrPort, now time.Time) error {
+func (e *Engine) Reload(list []endpoints.Endpoint, now time.Time) error {
 	norm, err := normalizeList(list)
 	if err != nil {
 		return err
 	}
 	byAddr := make(map[netip.AddrPort]*endpointState, len(norm))
 	next := make([]*endpointState, len(norm))
-	for i, ap := range norm {
-		s := e.byAddr[ap]
+	for i, ep := range norm {
+		s := e.byAddr[ep.Addr]
 		if s == nil {
-			s = &endpointState{addr: ap, ring: stats.NewRing(e.p.History)}
+			s = &endpointState{addr: ep.Addr, ring: stats.NewRing(e.p.History)}
 		}
-		s.index = i
+		s.index, s.name = i, ep.Name
 		next[i] = s
-		byAddr[ap] = s
+		byAddr[ep.Addr] = s
 	}
 	if e.selected != nil && byAddr[e.selected.addr] == nil {
 		e.removed = e.selected.addr
@@ -459,7 +461,7 @@ type tick struct {
 }
 
 func label(c *cand) string {
-	return "#" + strconv.Itoa(c.st.index) + " " + c.st.addr.String()
+	return endpoints.Label(c.st.name, c.st.index) + " " + c.st.addr.String()
 }
 
 func secs(d time.Duration) string {
@@ -664,6 +666,7 @@ func (t *tick) record(gap, anyDegrade bool) Record {
 		v := EndpointView{
 			Addr:           c.st.addr,
 			Index:          i,
+			Name:           endpoints.DisplayName(c.st.name, i),
 			Active:         c == t.a,
 			Samples:        c.est.Samples,
 			Replies:        c.est.Replies,

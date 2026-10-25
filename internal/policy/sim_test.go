@@ -7,6 +7,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/bjin/wgsteer/internal/endpoints"
 	"github.com/bjin/wgsteer/internal/stats"
 )
 
@@ -127,7 +128,7 @@ func newSim(p Params, seed uint64, paths []path, start int) *sim {
 	if start >= 0 {
 		sel = s.addrs[start]
 	}
-	eng, err := New(p, s.addrs, sel, simEpoch)
+	eng, err := New(p, endpoints.Unnamed(s.addrs), sel, simEpoch)
 	if err != nil {
 		panic(err)
 	}

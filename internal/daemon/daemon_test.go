@@ -15,6 +15,7 @@ import (
 
 	"golang.zx2c4.com/wireguard/wgctrl/wgtypes"
 
+	"github.com/bjin/wgsteer/internal/endpoints"
 	"github.com/bjin/wgsteer/internal/nftable"
 	"github.com/bjin/wgsteer/internal/policy"
 	"github.com/bjin/wgsteer/internal/probe"
@@ -238,7 +239,7 @@ func newHarness(t *testing.T, cfg Config, list []netip.AddrPort, devEP netip.Add
 		newProbe: func(probe.Config) (Prober, error) { return h.prb, nil },
 	}
 	h.d = newDaemon(cfg, NewLogging(h.logs, cfg.LogLevel), h.clk, wall, NewHeartbeat(time.Now()), dp)
-	h.d.list = list
+	h.d.setList(endpoints.Unnamed(list))
 	h.d.ident = &probecfg.Config{PrivateKey: priv, PublicKey: priv.PublicKey(), PeerKey: peerKey.PublicKey()}
 	dev, err := h.dev.Get("wg0")
 	if err != nil {
@@ -731,6 +732,40 @@ func TestReloadRemovingSelectionSwitchesAtOnce(t *testing.T) {
 	// switch then denies it like an alias.
 	if n := len(h.nft.applies); !denies(h.nft.applies[n-2], epB, epC) || !denies(h.nft.last(), epC, epA) {
 		t.Fatalf("rules = %+v", h.nft.applies)
+	}
+}
+
+// TestReloadRenamesAndReorders: names follow the list; an unnamed endpoint
+// is named by its new index.
+func TestReloadRenamesAndReorders(t *testing.T) {
+	cfg := testConfig()
+	cfg.Cooldown = time.Hour
+	cfg.Endpoints = filepath.Join(t.TempDir(), "endpoints")
+	h := newHarness(t, cfg, []netip.AddrPort{epA, epB, epC}, epA)
+	for _, ep := range []netip.AddrPort{epA, epB, epC} {
+		h.rtt[ep] = 10 * time.Millisecond
+	}
+	h.slot()
+	list := epC.String() + " # far\n" + epA.String() + " #  us \n" + epB.String() + " #\n"
+	if err := os.WriteFile(cfg.Endpoints, []byte(list), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h.d.reload(h.clk.Now())
+	h.slot()
+	h.d.publish()
+	s := h.d.snap.Load()
+	if s.Selection.Endpoint != epA || s.Selection.Index != 1 || s.Selection.Name != "us" {
+		t.Fatalf("selection %+v", s.Selection)
+	}
+	var names []string
+	for _, e := range s.Endpoints {
+		names = append(names, e.Name)
+	}
+	if got := strings.Join(names, " "); got != "far us 2" {
+		t.Fatalf("endpoint names %q", got)
+	}
+	if sl := s.Probe.Slot; sl == nil || sl.Name != endpoints.DisplayName(h.d.eps[sl.Index].Name, sl.Index) {
+		t.Fatalf("slot %+v", sl)
 	}
 }
 

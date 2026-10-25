@@ -31,8 +31,10 @@ func run() int {
 		fmt.Fprintln(os.Stderr, "wgsteer:", err)
 		return 1
 	}
-	logging := daemon.NewLogging(os.Stderr, cfg.LogLevel)
-	if err := daemon.Run(cfg, logging); err != nil {
+	logging := daemon.OpenLogging(cfg, os.Stderr)
+	err = daemon.Run(cfg, logging)
+	logging.Close()
+	if err != nil {
 		return 1
 	}
 	return 0

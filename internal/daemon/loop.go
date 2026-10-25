@@ -213,7 +213,7 @@ func (d *daemon) tick(now time.Time) {
 			if !v.Eligible {
 				msg = "endpoint ineligible"
 			}
-			d.log.Info(msg, "endpoint", v.Addr, "index", v.Index, "samples", v.Samples, "cost", round(float64(v.Cost)))
+			d.log.Info(msg, "endpoint", v.Addr, "index", v.Index, "name", v.Name, "samples", v.Samples, "cost", round(float64(v.Cost)))
 		}
 	}
 	if d.debug() {
@@ -227,16 +227,17 @@ func (d *daemon) tick(now time.Time) {
 // reload re-reads the endpoint list on SIGHUP (policy rule 6). The
 // probe config is not reloaded.
 func (d *daemon) reload(now time.Time) {
-	list, err := endpoints.Load(d.cfg.Endpoints)
+	eps, err := endpoints.Load(d.cfg.Endpoints)
 	if err != nil {
 		d.log.Error("reload failed", "error", err, "kept", len(d.list))
 		return
 	}
 	oldSel := d.eng.Selected()
-	if err := d.eng.Reload(list, now); err != nil {
+	if err := d.eng.Reload(eps, now); err != nil {
 		d.log.Error("reload failed", "error", err, "kept", len(d.list))
 		return
 	}
+	list := endpoints.Addrs(eps)
 	var added, removed []string
 	for _, ep := range list {
 		if endpoints.Index(d.list, ep) < 0 {
@@ -249,7 +250,7 @@ func (d *daemon) reload(now time.Time) {
 			delete(d.eligible, ep)
 		}
 	}
-	d.list = list
+	d.setList(eps)
 	// Aliases that became listed are ordinary candidates now.
 	d.aliases = slices.DeleteFunc(d.aliases, func(a netip.AddrPort) bool { return endpoints.Index(list, a) >= 0 })
 	if oldSel.IsValid() && !d.eng.Selected().IsValid() {

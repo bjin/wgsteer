@@ -41,9 +41,13 @@ type Watchdog struct {
 	Now       func() time.Time // monotonic time source; time.Now in production
 	Exit      func(code int)   // os.Exit in production
 	Logger    *slog.Logger
-	// LogTimeout bounds the wait for the stall report (default 1 s). The loop
-	// may be stalled writing to the same blocked stderr, so the exit never
-	// depends on the report getting out.
+	// Flush, if set, runs after the stall report to get buffered log output
+	// out (Logging.Close: finishes the log file). Like the report it is
+	// best effort within LogTimeout.
+	Flush func()
+	// LogTimeout bounds the wait for the stall report and Flush (default
+	// 1 s). The loop may be stalled writing to the same blocked stderr or
+	// inside the log file writer, so the exit never depends on either.
 	LogTimeout time.Duration
 }
 
@@ -60,6 +64,9 @@ func (w *Watchdog) Check() bool {
 		buf = buf[:runtime.Stack(buf, true)]
 		w.Logger.Error("watchdog: event loop stalled, exiting",
 			"stalled_for", age.Round(time.Millisecond), "limit", w.Limit, "stacks", string(buf))
+		if w.Flush != nil {
+			w.Flush()
+		}
 	}()
 	timeout := w.LogTimeout
 	if timeout <= 0 {

@@ -49,17 +49,21 @@ wgsteer \
 | `--endpoints` | Candidate list, earlier lines preferred |
 | `--probe-addr` | The probe's tunnel address (source of the probe ICMP); it need not be assigned to any interface |
 | `--target` | The server's tunnel address (ICMP destination); same family as `--probe-addr` |
+| `--log-dir` | Write the log to hourly gzip files in this directory instead of stderr (default: stderr) |
+| `--log-max-age` | With `--log-dir`: delete files of hours that ended longer ago than this (default `168h`, at least `1h`) |
 
 All tunables and their defaults: `wgsteer -h`. Start with `--dry-run` for a while to see what it would do: it probes, scores and logs `would switch` decisions but never touches the device or nftables.
 
 Endpoint list (`--endpoints`): one literal endpoint per line, `#` comments and blank lines allowed. IPv6 needs brackets; hostnames, zones, link-local, IPv4-mapped, unspecified and multicast addresses, port 0 and duplicates are rejected.
 
+A `#` comment after an endpoint on the same line names it (the comment text without surrounding whitespace). Names are 1-32 bytes of `A-Z a-z 0-9 . _ -`, not all digits, and unique in the list; anything else is an error naming the line. An endpoint without a name (no comment, or an empty one such as `addr #`) is named by its list index. Logs, reasons and the status dump label endpoints `#name` (`#us 203.0.113.10:443`, `#3 203.0.113.1:51820`); names follow the list on `SIGHUP`.
+
 ```
 # preferred first
-203.0.113.10:443
-198.51.100.20:51820
-[2001:db8::30]:443
-# direct to the server, last resort
+203.0.113.10:443 # us
+198.51.100.20:51820 # us-alt
+[2001:db8::30]:443 # us-v6
+# direct to the server, last resort (unnamed: #3)
 203.0.113.1:51820
 ```
 
@@ -96,6 +100,10 @@ allowed_ip=192.0.2.1/32
 There is no control API. To inhibit steering or pin an endpoint, stop the service (a clean stop deletes the table, so the device behaves like plain WireGuard), then use `wg set` as needed. While the daemon runs, a manual `wg set` to a listed endpoint is reverted.
 
 Exit codes: 0 clean stop, 1 invalid flags or startup failure, 3 watchdog (event loop stalled). A restart policy is required: after any unexpected exit the device keeps working unmanaged until the daemon is restarted.
+
+## Logging to files
+
+By default every record goes to stderr (`key=value` text, millisecond timestamps). With `--log-dir DIR` records go only to `DIR/wgsteer-YYYY-MM-DDTHH.log.gz`, a file per UTC hour of the wall clock; stderr then only gets flag errors and the file writer's own failure notices. `DIR` is created (0750) if missing, files are 0640. Every file is created new: a restart within the hour writes the hour's next file, `wgsteer-YYYY-MM-DDTHH_1.log.gz`, `_2`, … (a killed daemon leaves its file without a gzip trailer, and nothing is ever written behind that). Data is sync-flushed at most 10 s after it is written, so a reader decompressing the still-open file sees everything older than that; rotation and a clean stop (or startup failure) finish the file. Files of hours that ended more than `--log-max-age` ago are deleted when the daemon opens its first file and at every rotation; other files in `DIR` are never touched. Each file opened by a rotation starts with the `config` record, so every file states the effective settings. Details: [docs/observability.md](docs/observability.md#logging-basics).
 
 ## systemd
 

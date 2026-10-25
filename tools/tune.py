@@ -6,9 +6,12 @@ them once, characterizes the paths, and replays them through the real policy
 engine (cmd/wgsteer-replay, built on demand) for any endpoint subset and any
 flag set:
 
-  extract LOGS...      parse debug logs (wgsteer-*.log.gz or .log) into --data
+  extract LOGS...      parse debug logs (wgsteer-*.log.gz or .log, e.g. a copy
+                       of the daemon's --log-dir) into --data; --since/--until
+                       restrict it to one time span
   verify               replay the recorded runs with their own flags; every
-                       logged decision must be reproduced
+                       logged decision must be reproduced (resumed segments,
+                       whose run start is not in the logs: report only)
   paths                per-endpoint loss/RTT, by hour, loss runs, common-mode
                        losses, wg0 ground truth
   replay [-- FLAGS]    one flag set on the presets: switches and quality,
@@ -48,7 +51,6 @@ import bisect
 import collections
 import datetime
 import glob
-import gzip
 import itertools
 import json
 import math
@@ -58,6 +60,7 @@ import shutil
 import statistics
 import subprocess
 import sys
+import zlib
 from concurrent.futures import ProcessPoolExecutor
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -127,22 +130,94 @@ def go_duration_us(s):
 # extract
 
 
-def parse_file(path):
-    """One log file: samples (with the decision logged right after each) and
-    the info lines needed to reconstruct the daemon runs."""
-    opener = gzip.open if path.endswith(".gz") else open
-    samples, infos = [], []
-    with opener(path, "rt", encoding="utf-8", errors="replace") as f:
-        for line in f:
+def log_lines(path):
+    """Lines of a log file (without the newline): plain text, or gzip with any
+    number of members. The newest
+    member may be unterminated (the daemon's open file, sync-flushed): what it
+    holds is read and a partial last line dropped."""
+    if not path.endswith(".gz"):
+        with open(path, encoding="utf-8", errors="replace") as f:
+            for line in f:
+                yield line.rstrip("\n")
+        return
+    d, fed, rest = zlib.decompressobj(31), False, b""
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(1 << 18)
+            if not chunk:
+                break
+            while chunk:
+                try:
+                    out = d.decompress(chunk)
+                except zlib.error as e:
+                    print("tune.py: %s: %s; ignoring the rest of the file" % (path, e), file=sys.stderr)
+                    return
+                fed, chunk = True, b""
+                if d.eof:  # member complete; the next one may follow
+                    chunk, d, fed = d.unused_data, zlib.decompressobj(31), False
+                head, sep, rest = (rest + out).rpartition(b"\n")
+                if sep:
+                    yield from head.decode("utf-8", "replace").split("\n")
+    if fed:  # unterminated member: keep only complete lines
+        head, sep, _ = (rest + d.flush()).rpartition(b"\n")
+        if sep:
+            yield from head.decode("utf-8", "replace").split("\n")
+    elif rest:
+        yield rest.decode("utf-8", "replace")
+
+
+INFO_KEYS = (" msg=starting ", " msg=config ", " msg=endpoint ", ' msg="initial selection" ',
+             ' msg="would switch" ', " msg=switch ", " msg=stopped", ' msg="run.sh wg0 ping" ',
+             ' msg="device handshake stale" ', ' msg="probe session expired" ',
+             ' msg="probe session established" ', ' msg="endpoints reloaded" ')
+
+
+def parse_file(job):
+    """One log file: samples (with the decision logged right after each), the
+    info lines needed to reconstruct the daemon runs, and complete decision
+    ticks (every "trace endpoint" row from index 0, then "trace decision"):
+    the file's first one and the first after each reload, where a run may
+    have to be resumed. Records outside [since, until) are skipped."""
+    path, since, until = job
+    inside = lambda t: since <= t < until
+    samples, infos, ticks = [], [], []
+    want, rows = True, None
+    try:
+        for line in log_lines(path):
             if " msg=sample " in line:
                 m = SAMPLE.match(line)
                 if m:
                     idx, outcome, rtt, slot, after = m.groups()
                     slot_us = us(slot)
-                    samples.append([slot_us, slot_us + int(round(float(after) * 1000)), int(idx), outcome[0],
-                                    int(round(float(rtt) * 1000)), "-"])
+                    tick_us = slot_us + int(round(float(after) * 1000))
+                    if inside(tick_us):
+                        samples.append([slot_us, tick_us, int(idx), outcome[0], int(round(float(rtt) * 1000)), "-"])
+                continue
+            if ' msg="trace endpoint" ' in line:
+                if want:
+                    r = pairs(line)
+                    i = int(r["index"])
+                    if not inside(us(r["time"])):
+                        rows = None
+                    elif i == 0:
+                        rows = [r]
+                    elif rows is not None and i == len(rows):
+                        rows.append(r)
+                    else:
+                        rows = None
                 continue
             if ' msg="trace decision" ' in line:
+                if want and rows:
+                    t = us(rows[0]["time"])
+                    # The tick's own sample, if it had one (a reload's tick has
+                    # none): the resumed segment starts with it.
+                    own = samples and samples[-1][5] == "-" and t - samples[-1][1] < 1_000_000
+                    ticks.append({"t_us": t, "start_us": samples[-1][1] if own else t,
+                                  "endpoints": [r["endpoint"] for r in rows],
+                                  "names": [r.get("name") or r["index"] for r in rows],
+                                  "active": next((k for k, r in enumerate(rows) if r.get("active") == "true"), -1)})
+                    want = False
+                rows = None
                 m = DECISION.match(line)
                 if m and samples and samples[-1][5] == "-":
                     sw, kind, to, blocker = m.groups()
@@ -150,14 +225,37 @@ def parse_file(path):
                 continue
             if " level=DEBUG " in line:
                 continue
-            for key in (" msg=starting ", " msg=config ", " msg=endpoint ", ' msg="initial selection" ',
-                        ' msg="would switch" ', " msg=switch ", " msg=stopped", ' msg="run.sh wg0 ping" ',
-                        ' msg="device handshake stale" ', ' msg="probe session expired" ',
-                        ' msg="probe session established" ', ' msg="endpoints reloaded" '):
+            for key in INFO_KEYS:
                 if key in line:
-                    infos.append(pairs(line.rstrip("\n")))
+                    r = pairs(line)
+                    t = us(r["time"])
+                    # Earlier config records too: a run resumed at --since
+                    # takes its flags from them.
+                    if inside(t) or r["msg"] == "config" and t < until:
+                        infos.append(r)
+                        if r["msg"] == "endpoints reloaded":
+                            want, rows = True, None
                     break
-    return path, samples, infos
+    except FileNotFoundError:
+        print("tune.py: %s vanished (pruned by the daemon?); skipped" % path, file=sys.stderr)
+    return path, samples, infos, ticks
+
+
+def parse_time(s):
+    """ISO-8601 time with an offset or Z to microseconds since the epoch."""
+    try:
+        d = datetime.datetime.fromisoformat(s)
+    except ValueError:
+        die("bad time %r (want ISO-8601, e.g. 2026-10-25T06:00:00Z)" % s)
+    if d.tzinfo is None:
+        die("time %r needs an offset or Z" % s)
+    return int(round(d.timestamp() * 1e6))
+
+
+def iso(t_us):
+    """UTC, milliseconds: precise enough to pass back as --since/--until."""
+    d = datetime.datetime.fromtimestamp(t_us / 1e6, datetime.timezone.utc)
+    return d.strftime("%Y-%m-%dT%H:%M:%S.") + "%03dZ" % (d.microsecond // 1000)
 
 
 def cmd_extract(a):
@@ -170,75 +268,143 @@ def cmd_extract(a):
     files = sorted(set(files))
     if not files:
         die("no log files in " + " ".join(a.logs))
+    since = parse_time(a.since) if a.since else -(1 << 62)
+    until = parse_time(a.until) if a.until else 1 << 62
     with ProcessPoolExecutor() as ex:
-        parsed = list(ex.map(parse_file, files))
+        parsed = list(ex.map(parse_file, [(f, since, until) for f in files]))
 
-    rows, infos = [], []
-    for _, s, i in parsed:
+    rows, infos, ticks = [], [], []
+    for _, s, i, k in parsed:
         rows += s
         infos += i
+        ticks += k
     rows.sort(key=lambda r: r[1])
-    infos.sort(key=lambda r: us(r["time"]))
 
     # Daemon runs: each "starting" begins a segment; the engine is created at
-    # "initial selection" with the logged config and endpoint list.
-    segments, cur = [], None
-    events, pings, stale, sessions = [], [], [], []
-    for r in infos:
-        msg, t = r["msg"], us(r["time"])
+    # "initial selection" with the logged config and endpoint list. A run
+    # whose start is not in the logs (pruned, or before --since) and the rest
+    # of a run after a reload are resumed segments: they start at the first
+    # complete decision tick, with its endpoint list and active endpoint.
+    events = sorted([(us(r["time"]), 0, r) for r in infos] + [(k["t_us"], 1, k) for k in ticks],
+                    key=lambda e: (e[0], e[1]))
+    segments, cur, last_config = [], None, None
+    events_out, pings, stale, sessions, reloads = [], [], [], [], []
+
+    def segment(**kw):
+        s = {"id": len(segments), "endpoints": [], "names": [], "config": None, **kw}
+        segments.append(s)
+        return s
+
+    for t, kind, r in events:
+        if kind == 1:
+            if cur is None or "start_us" not in cur:
+                cur = segment(resumed=True, start_us=r["start_us"], selection=r["active"],
+                              endpoints=r["endpoints"], names=r["names"], config=last_config)
+            continue
+        msg = r["msg"]
         if msg == "starting":
-            cur = {"id": len(segments), "pid": r.get("pid"), "endpoints": [], "config": {}}
-            segments.append(cur)
-        elif msg == "config" and cur is not None:
-            cur["config"] = {k: r[k] for k in POLICY_FLAGS + ("probe_timeout", "dry_run") if k in r}
-        elif msg == "endpoint" and cur is not None:
+            cur = segment(pid=r.get("pid"))
+        elif msg == "config":
+            # Startup report, or a log file's header after a rotation (same
+            # values within a run).
+            last_config = {k: r[k] for k in POLICY_FLAGS + ("probe_timeout", "dry_run") if k in r}
+            if cur is not None and ("start_us" not in cur or cur["config"] is None):
+                cur["config"] = last_config
+        elif msg == "endpoint" and cur is not None and "start_us" not in cur:
             cur["endpoints"].append(r["endpoint"])
-        elif msg == "initial selection" and cur is not None:
+            cur["names"].append(r.get("name") or r["index"])
+        elif msg == "initial selection" and cur is not None and "start_us" not in cur:
             cur["start_us"] = t
             cur["selection"] = int(r["index"])
         elif msg == "stopped" and cur is not None:
             cur["stop_us"] = t
+            cur = None
+        elif msg == "endpoints reloaded":
+            reloads.append(t)
+            if cur is not None and "start_us" in cur:
+                cur["stop_us"] = t
+                cur["stopped_by"] = "reload"
+                cur = None
+            elif cur is not None:  # while waiting for the device: the list is logged again
+                cur["endpoints"], cur["names"] = [], []
         elif msg in ("would switch", "switch"):
-            events.append({"t_us": t, "segment": cur["id"] if cur else None, "kind": r["kind"], "from": r["from"],
-                           "to": r["to"], "g": r.get("g"), "dry_run": msg == "would switch"})
+            events_out.append({"t_us": t, "segment": cur["id"] if cur else None, "kind": r["kind"], "from": r["from"],
+                               "to": r["to"], "g": r.get("g"), "dry_run": msg == "would switch"})
         elif msg == "run.sh wg0 ping":
             pings.append({"t_us": t, **{k: r[k] for k in r if k not in ("time", "level", "msg")}})
         elif msg == "device handshake stale":
             stale.append({"t_us": t, "handshake_age": r.get("handshake_age"), "selection": r.get("selection")})
         elif msg in ("probe session expired", "probe session established"):
             sessions.append({"t_us": t, "msg": msg})
-        elif msg == "endpoints reloaded":
-            die("the log contains a SIGHUP reload; replaying list changes is not supported")
     segments = [s for s in segments if "start_us" in s]
     if not segments:
-        die("no daemon start (msg=starting ... initial selection) in the logs")
-    lists = {tuple(s["endpoints"]) for s in segments}
-    if len(lists) != 1:
-        die("the endpoint list differs between daemon runs; extract each run separately")
+        die("no daemon run in the logs (msg=starting ... initial selection, or a complete decision tick at debug level)")
+
+    # Different endpoint lists cannot share one trace (indices would mix).
+    spans = []
+    for s in segments:
+        if spans and spans[-1][0] == s["endpoints"]:
+            spans[-1][1].append(s)
+        else:
+            spans.append((s["endpoints"], [s]))
+    if len({tuple(eps) for eps, _ in spans}) > 1:
+        lines = []
+        for eps, segs in spans:
+            last = segs[-1]
+            end = last.get("stop_us") or max((r[1] for r in rows if r[1] >= last["start_us"]), default=last["start_us"])
+            lines.append("  %s .. %s: %d endpoints %s" % (iso(segs[0]["start_us"]), iso(end), len(eps), ",".join(eps)))
+        die("the endpoint list differs between daemon runs (or a reload changed it); extract one span with "
+            "--since/--until (a span starts at its first record, so its start time is a clean --since):\n" +
+            "\n".join(lines))
     endpoints = segments[0]["endpoints"]
 
     # Assign samples to segments by tick time.
     starts = [s["start_us"] for s in segments]
     os.makedirs(a.data, exist_ok=True)
     counts = collections.Counter()
+    slots = collections.defaultdict(list)
     with open(os.path.join(a.data, "trace.tsv"), "w") as f:
         f.write("# segment\tslot_us\ttick_us\tindex\toutcome\trtt_us\tlogged_decision\n")
         for slot_us, tick_us, idx, outcome, rtt_us, dec in rows:
-            seg = bisect.bisect_right(starts, tick_us) - 1
-            if seg < 0 or tick_us > segments[seg].get("stop_us", 1 << 62):
+            k = bisect.bisect_right(starts, tick_us) - 1
+            if k < 0 or tick_us > segments[k].get("stop_us", 1 << 62):
                 counts["outside"] += 1
                 continue
-            f.write("%d\t%d\t%d\t%d\t%s\t%d\t%s\n" % (seg, slot_us, tick_us, idx, outcome, rtt_us, dec))
+            seg = segments[k]
+            f.write("%d\t%d\t%d\t%d\t%s\t%d\t%s\n" % (seg["id"], slot_us, tick_us, idx, outcome, rtt_us, dec))
             counts[outcome] += 1
-            segments[seg]["end_us"] = tick_us
-    meta = {"endpoints": endpoints, "segments": segments, "events": events, "wg0_pings": pings,
-            "handshake_stale": stale, "probe_sessions": sessions, "files": len(files)}
+            seg["end_us"] = tick_us
+            slots[seg["id"]].append(slot_us)
+    for s in segments:
+        s["config_source"] = "logged"
+        if s["config"] is None:
+            # No config record before or within a resumed run (old binaries
+            # write none at rotation): only the probe interval is known, from
+            # the slot grid; the policy flags are the replay's defaults.
+            gaps = sorted(y - x for x, y in zip(slots[s["id"]], slots[s["id"]][1:]) if y > x)
+            interval_ms = round(gaps[len(gaps) // 2] / 1000) if gaps else 1000
+            s["config"], s["config_source"] = {"probe_interval": "%dms" % interval_ms}, "inferred"
+            print("tune.py: segment %d (resumed at %s): no config record in the logs; probe interval %d ms "
+                  "inferred from the samples, policy flags unknown (verify uses the defaults)" % (
+                      s["id"], iso(s["start_us"]), interval_ms), file=sys.stderr)
+    names = [n if n else str(i) for i, n in enumerate(segments[-1]["names"])]
+    meta = {"endpoints": endpoints, "names": names, "segments": segments, "events": events_out, "wg0_pings": pings,
+            "handshake_stale": stale, "probe_sessions": sessions, "reloads": reloads, "files": len(files),
+            "since_us": since if a.since else None, "until_us": until if a.until else None}
     with open(os.path.join(a.data, "meta.json"), "w") as f:
         json.dump(meta, f, indent=1)
     span = sum(s.get("end_us", s["start_us"]) - s["start_us"] for s in segments) / 3600e6
-    print("%d files, %d daemon run(s), %.1f h, %d endpoints; samples: %d reply, %d loss, %d invalid (%d outside a run); "
-          "%d logged switch(es)" % (len(files), len(segments), span, len(endpoints), counts["r"], counts["l"],
-                                    counts["i"], counts["outside"], len(events)))
+    resumed = sum(1 for s in segments if s.get("resumed"))
+    print("%d files, %d daemon run segment(s) (%d resumed), %.1f h, %d endpoints; samples: %d reply, %d loss, "
+          "%d invalid (%d outside a segment); %d logged switch(es)" % (
+              len(files), len(segments), resumed, span, len(endpoints), counts["r"], counts["l"], counts["i"],
+              counts["outside"], len(events_out)))
+    for s in segments:
+        print("  segment %d: %s .. %s%s, start on %s, config %s" % (
+            s["id"], iso(s["start_us"]), iso(s.get("end_us", s["start_us"])),
+            " (resumed)" if s.get("resumed") else "",
+            "#%s %s" % (s["names"][s["selection"]], endpoints[s["selection"]]) if s["selection"] >= 0 else "none",
+            s["config_source"]))
     print("wrote %s/trace.tsv and %s/meta.json" % (a.data, a.data))
 
 
@@ -256,8 +422,9 @@ class Data:
         self.dir = path
         self.trace = os.path.join(path, "trace.tsv")
         self.endpoints = self.meta["endpoints"]
-        self.segments = self.meta["segments"]
         self.n = len(self.endpoints)
+        self.names = self.meta.get("names") or [str(i) for i in range(self.n)]
+        self.segments = self.meta["segments"]
         cfg = self.segments[-1]["config"]
         self.interval_us = go_duration_us(cfg.get("probe_interval", "1s"))
         self.timeout_us = go_duration_us(cfg.get("probe_timeout", "500ms"))
@@ -277,8 +444,13 @@ class Data:
         self.t0 = min(s["start_us"] for s in self.segments)
         self.t1 = max(s.get("end_us", s["start_us"]) for s in self.segments)
 
+    def tag(self, i):
+        """Short label: #name (#index when unnamed), "none" for -1."""
+        return "#" + self.names[i] if i >= 0 else "none"
+
     def label(self, i):
-        return "#%d %s" % (i, self.endpoints[i])
+        """The daemon's label: #name address."""
+        return "%s %s" % (self.tag(i), self.endpoints[i]) if i >= 0 else "none"
 
 
 def config_args(cfg):
@@ -310,6 +482,7 @@ def run_replay(a, data, runs, trace=None):
     job = {
         "trace": os.path.abspath(trace or data.trace),
         "endpoints": data.endpoints,
+        "names": data.names,
         "segments": [{"id": s["id"], "start_us": s["start_us"], "selection": s["selection"]} for s in data.segments],
         "runs": runs,
     }
@@ -538,14 +711,19 @@ def cmd_verify(a):
     CLOCK_BOOTTIME. Slots sit on a 1-interval grid, so a net-time accumulator
     reaches its limit within microseconds of a tick and the exact tick can
     differ by one. Verification therefore requires the same switches (kind,
-    from, to) at most one tick apart, and every other decision identical."""
+    from, to) at most one tick apart, and every other decision identical.
+
+    A resumed segment (run start not in the logs, or the rest of a run after
+    a reload) is replayed from an empty engine while the daemon had its full
+    history, accumulators and restore levels, so its decisions are reported,
+    never required: the report says from which tick on they agree."""
     data = Data(a.data)
     runs = [{"name": "segment %d" % s["id"], "endpoints": list(range(data.n)), "segments": [s["id"]],
              "args": config_args(s["config"]), "decisions": True} for s in data.segments]
     results = run_replay(a, data, runs)
-    bad = 0
-    ties = 0
+    bad = ties = strict = 0
     for s, r in zip(data.segments, results):
+        resumed = bool(s.get("resumed"))
         logged = [(t, d) for seg, t, d in data.ticks if seg == s["id"]]
         got = r["decisions"]
         if len(got) != len(logged):
@@ -559,25 +737,42 @@ def cmd_verify(a):
         real = [i for i in miss if not same or i not in near]
         shifted = sum(1 for i, j in zip(lsw, rsw) if i != j) if same else 0
         unlogged = sum(1 for _, d in logged if d == "-")
-        print("segment %d (%s, %.1f h): %d ticks, %d logged / %d replayed switches (%d one tick apart), "
+        print("segment %d (%s, %.1f h%s): %d ticks, %d logged / %d replayed switches (%d one tick apart), "
               "%d other decision mismatch(es)%s" % (
                   s["id"], local_time(s["start_us"], a.tz), (s.get("end_us", s["start_us"]) - s["start_us"]) / 3600e6,
-                  len(got), len(lsw), len(rsw), shifted, len(real),
+                  ", resumed: report only" if resumed else "", len(got), len(lsw), len(rsw), shifted, len(real),
                   ", %d ticks without a logged decision" % unlogged if unlogged else ""))
+        if resumed:
+            last = max(real + ([] if same else lsw + rsw), default=-1)
+            if last < 0:
+                print("  all decisions agree")
+            elif last + 1 < len(logged):
+                print("  decisions agree from %s on (the last %.1f h, %.0f%% of the ticks)" % (
+                    local_time(logged[last + 1][0], a.tz), (logged[-1][0] - logged[last + 1][0]) / 3600e6,
+                    100 * (len(logged) - last - 1) / len(logged)))
+            else:
+                print("  decisions disagree up to the end")
         if not same:
             print("  switch sequence differs:")
             for i in lsw:
                 print("    logged   %s %s" % (local_time(logged[i][0], a.tz), logged[i][1]))
             for j in rsw:
                 print("    replayed %s %s" % (local_time(logged[j][0], a.tz), got[j]))
-            bad += 1
         for i in real[:10]:
             print("  %s logged %s, replayed %s" % (local_time(logged[i][0], a.tz), logged[i][1], got[i]))
-        bad += len(real)
+        if resumed:
+            continue
+        strict += 1
+        bad += len(real) + (0 if same else 1)
         ties += shifted
     if bad:
         die("replay does not reproduce the logged decisions")
-    print("OK: all decisions reproduced (%d switch(es) one tick apart: accumulator ties)" % ties)
+    resumed = len(data.segments) - strict
+    if not strict:
+        print("OK: nothing to verify strictly (%d resumed segment(s), reported above)" % resumed)
+        return
+    print("OK: all decisions of %d segment(s) reproduced (%d switch(es) one tick apart: accumulator ties)%s" % (
+        strict, ties, "; %d resumed segment(s) reported only" % resumed if resumed else ""))
 
 
 # ---------------------------------------------------------------------------
@@ -597,7 +792,8 @@ def cmd_paths(a):
     period = data.interval_us * data.n / 1e6
     print("%d endpoints, %.1f h, each probed every %.0f s" % (data.n, (data.t1 - data.t0) / 3600e6, period))
     print("\nWhole run: loss, RTT percentiles (ms), loss runs (consecutive losses in the endpoint's own samples)")
-    print("  #  endpoint                                      samples   loss    p50    p90    p99    max  runs 1/2/3+  longest")
+    print("  #  name         endpoint                                      samples   loss    p50    p90    p99    max  "
+          "runs 1/2/3+  longest")
     for i in range(data.n):
         xs = data.samples[i]
         rt = sorted(s[2] for s in xs if s[1])
@@ -610,12 +806,12 @@ def cmd_paths(a):
                 runs["max"] = max(runs["max"], r)
                 r = 0
         q = lambda p: rt[min(int(p * len(rt)), len(rt) - 1)] if rt else float("nan")
-        print("%3d  %-44s %7d %5.1f%% %6.1f %6.1f %6.1f %6.1f  %4d/%d/%d  %7d" % (
-            i, data.endpoints[i], len(xs), 100 * (1 - len(rt) / len(xs)) if xs else 0, q(.5), q(.9), q(.99),
+        print("%3d  %-12s %-44s %7d %5.1f%% %6.1f %6.1f %6.1f %6.1f  %4d/%d/%d  %7d" % (
+            i, data.names[i], data.endpoints[i], len(xs), 100 * (1 - len(rt) / len(xs)) if xs else 0, q(.5), q(.9), q(.99),
             rt[-1] if rt else float("nan"), runs[1], runs[2], runs[3], runs["max"]))
 
     print("\nBy hour of day (UTC%+g): median RTT ms / RTT sd ms / loss %%" % tz)
-    print("hh " + "".join("  %-16s" % ("#%d" % i) for i in range(data.n)))
+    print("hh " + "".join("  %-16s" % data.tag(i)[:16] for i in range(data.n)))
     for h in range(24):
         cells = []
         for i in range(data.n):
@@ -638,7 +834,7 @@ def cmd_paths(a):
              sum(1 for s in data.samples[i] if not s[1]) / len(data.samples[i]) < 0.01]
     hist = collections.Counter(sum(1 for i in clean if i in v and not v[i]) for v in rnd.values())
     print("\nCommon-mode losses among the endpoints under 1%% loss (%s): rounds by number of them lost in the "
-          "same round: %s" % (",".join(map(str, clean)), ", ".join("%d: %d" % kv for kv in sorted(hist.items()))))
+          "same round: %s" % (",".join(data.tag(i) for i in clean), ", ".join("%d: %d" % kv for kv in sorted(hist.items()))))
 
     pings = data.meta.get("wg0_pings", [])
     if pings:
@@ -651,10 +847,10 @@ def cmd_paths(a):
             rt = [s[2] for s in ys if s[1]]
             m = sum(rt) / len(rt) if rt else float("nan")
             sd = math.sqrt(max(sum(x * x for x in rt) / len(rt) - m * m, 0)) if rt else float("nan")
-            print("  %s %9s %7s %7s | #%-7d %6d %4d %8.1f %6.1f" % (
-                local_time(t, a.tz), p.get("loss", "?"), p.get("rtt_avg_ms", "?"), p.get("rtt_max_ms", "?"), sel,
+            print("  %s %9s %7s %7s | %-8s %6d %4d %8.1f %6.1f" % (
+                local_time(t, a.tz), p.get("loss", "?"), p.get("rtt_avg_ms", "?"), p.get("rtt_max_ms", "?"), data.tag(sel),
                 len(ys), len(ys) - len(rt), m, sd))
-        print("  (the probe compares only while wg0 stays on #%d, the recorded start endpoint, in a dry-run)" % sel)
+        print("  (the probe compares only while wg0 stays on %s, the recorded start endpoint, in a dry-run)" % data.label(sel))
 
 
 # ---------------------------------------------------------------------------
@@ -782,12 +978,12 @@ class Ctx:
 # replay
 
 
-def metric_row(label, m):
+def metric_row(data, label, m):
     k = m["kinds_day"]
     return "  %-26s %6.2f %5.2f %5.2f %5.2f %5d %7.2f %7.2f %6.1f%% %6.2f%% %6.1f %5d   %s" % (
         label, m["switches_day"], k.get("degrade", 0), k.get("restore", 0), k.get("outage", 0), m["flaps"],
         m["pref_regret"], m["regret"], 100 * m["worse"], 100 * m["loss"], m["rtt"], m["outage_probes"],
-        " ".join("#%d:%.0f%%" % (e, 100 * v) for e, v in m["share"].items() if v >= 0.005))
+        " ".join("%s:%.0f%%" % (data.tag(e), 100 * v) for e, v in m["share"].items() if v >= 0.005))
 
 
 METRIC_HEADER = ("  %-26s %6s %5s %5s %5s %5s %7s %7s %7s %7s %6s %5s   %s" % (
@@ -811,15 +1007,15 @@ def cmd_replay(a):
         print("\npreset %s = %s (deploy with --probe-interval %s)" % (
             name, ",".join(map(str, preset)), ctx.deploy_interval(preset)))
         print(METRIC_HEADER)
-        print(metric_row("these flags", mine))
-        print(metric_row("defaults", base))
-        print(metric_row("static #%d (hindsight)" % static[0], static[1]))
+        print(metric_row(ctx.data, "these flags", mine))
+        print(metric_row(ctx.data, "defaults", base))
+        print(metric_row(ctx.data, "static %s (hindsight)" % ctx.data.tag(static[0]), static[1]))
         if a.switches:
-            print("  switches (from/to: recorded index; the reason numbers endpoints by position in the preset):")
+            print("  switches:")
             for e in res[2 * k]["switches"]:
-                print("    %s %-8s #%d -> #%d  G %s  %s" % (local_time(e["t_us"], a.tz), e["kind"], e["from"], e["to"],
-                                                         e["g"] if isinstance(e["g"], str) else "%.3f" % e["g"],
-                                                         e["reason"]))
+                g = e["g"] if isinstance(e["g"], str) else "%.3f" % e["g"]
+                print("    %s %-8s %s -> %s  G %s  %s" % (local_time(e["t_us"], a.tz), e["kind"], ctx.data.label(e["from"]),
+                                                     ctx.data.label(e["to"]), g, e["reason"]))
 
 
 # ---------------------------------------------------------------------------
@@ -1191,7 +1387,9 @@ def main():
     ap.add_argument("--tz", type=float, help="hours east of UTC for printed times (default: local time)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     ex = sub.add_parser("extract", help="parse debug logs into --data")
-    ex.add_argument("logs", nargs="+", help="log directories or files")
+    ex.add_argument("logs", nargs="+", help="log directories (e.g. a copy of --log-dir) or files")
+    ex.add_argument("--since", metavar="TIME", help="skip records before TIME (ISO-8601 with offset or Z)")
+    ex.add_argument("--until", metavar="TIME", help="skip records from TIME on (ISO-8601 with offset or Z)")
     sub.add_parser("verify", help="replay the recorded runs with their own flags and compare every decision")
     sub.add_parser("paths", help="per-endpoint loss/RTT, by hour of day, loss runs, common-mode losses, wg0 ground truth")
 

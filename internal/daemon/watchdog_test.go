@@ -82,3 +82,31 @@ func TestWatchdogExitsDespiteBlockedLog(t *testing.T) {
 		t.Fatal("watchdog blocked on its log record instead of exiting")
 	}
 }
+
+// The loop may be stalled inside the log file writer, holding its lock; the
+// final flush then blocks too, and the exit must not wait for it.
+func TestWatchdogExitsDespiteBlockedFlush(t *testing.T) {
+	clock := &fakeMono{t: time.Unix(1000, 0)}
+	exited := make(chan int, 1)
+	unblock := make(chan struct{})
+	t.Cleanup(func() { close(unblock) })
+	w := &Watchdog{
+		Heartbeat:  NewHeartbeat(clock.t),
+		Limit:      time.Second,
+		Now:        clock.now,
+		Exit:       func(code int) { exited <- code },
+		Logger:     slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Flush:      func() { <-unblock },
+		LogTimeout: 20 * time.Millisecond,
+	}
+	clock.t = clock.t.Add(2 * time.Second)
+	go w.Check()
+	select {
+	case code := <-exited:
+		if code != 3 {
+			t.Fatalf("watchdog exited with %d, want 3", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("watchdog blocked on the log flush instead of exiting")
+	}
+}

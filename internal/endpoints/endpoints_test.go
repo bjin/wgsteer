@@ -10,20 +10,20 @@ import (
 func TestParseList(t *testing.T) {
 	in := `# relays
 192.0.2.1:51820
-  [2001:DB8:0::1]:443   # v6 relay
+  [2001:DB8:0::1]:443   #  v6-relay	
 
-127.0.0.1:4000
-198.51.100.7:51820
+127.0.0.1:4000 #
+198.51.100.7:51820#Fra_1.b
 `
 	got, err := Parse(strings.NewReader(in))
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []netip.AddrPort{
-		netip.MustParseAddrPort("192.0.2.1:51820"),
-		netip.MustParseAddrPort("[2001:db8::1]:443"),
-		netip.MustParseAddrPort("127.0.0.1:4000"),
-		netip.MustParseAddrPort("198.51.100.7:51820"),
+	want := []Endpoint{
+		{Addr: netip.MustParseAddrPort("192.0.2.1:51820")},
+		{Addr: netip.MustParseAddrPort("[2001:db8::1]:443"), Name: "v6-relay"},
+		{Addr: netip.MustParseAddrPort("127.0.0.1:4000")},
+		{Addr: netip.MustParseAddrPort("198.51.100.7:51820"), Name: "Fra_1.b"},
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
@@ -31,6 +31,39 @@ func TestParseList(t *testing.T) {
 	for i := range want {
 		if got[i] != want[i] {
 			t.Errorf("entry %d: got %v, want %v", i, got[i], want[i])
+		}
+	}
+	var labels []string
+	for i, e := range got {
+		labels = append(labels, Label(e.Name, i))
+	}
+	if l := strings.Join(labels, " "); l != "#0 #v6-relay #2 #Fra_1.b" {
+		t.Errorf("labels %q", l)
+	}
+}
+
+func TestParseNames(t *testing.T) {
+	long := strings.Repeat("a", MaxNameLen)
+	for _, c := range []struct {
+		in, err string // err: substring of the error, "" for success
+	}{
+		{"192.0.2.1:1 # " + long, ""},
+		{"192.0.2.1:1 # 1a", ""},
+		{"192.0.2.1:1 # " + long + "b", "line 1: invalid endpoint name"},
+		{"192.0.2.1:1 # two words", "line 1: invalid endpoint name"},
+		{"192.0.2.1:1 # us/east", "line 1: invalid endpoint name"},
+		{"192.0.2.1:1 # caf\u00e9", "line 1: invalid endpoint name"},
+		{"192.0.2.1:1 # a # b", "line 1: invalid endpoint name"},
+		{"\n192.0.2.1:1 # 042", "line 2: invalid endpoint name \"042\": all digits"},
+		{"192.0.2.1:1 # us\n# us\n192.0.2.2:1\n192.0.2.3:1 # us", "line 4: duplicate endpoint name \"us\" (first on line 1)"},
+		{"192.0.2.1:1 # us\n192.0.2.2:1 # US", ""},
+	} {
+		_, err := Parse(strings.NewReader(c.in))
+		switch {
+		case c.err == "" && err != nil:
+			t.Errorf("%q: %v", c.in, err)
+		case c.err != "" && (err == nil || !strings.Contains(err.Error(), c.err)):
+			t.Errorf("%q: err = %v, want %q", c.in, err, c.err)
 		}
 	}
 }
