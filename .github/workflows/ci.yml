@@ -11,8 +11,14 @@ permissions:
 
 jobs:
   test:
-    name: Test (linux/amd64)
-    runs-on: ubuntu-latest
+    name: Test (linux/${{ matrix.goarch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goarch: amd64, runner: ubuntu-26.04 }
+          - { goarch: arm64, runner: ubuntu-26.04-arm }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -26,11 +32,18 @@ jobs:
       - run: ./wgsteer --version
 
   integration:
-    name: Integration (linux/amd64)
+    name: Integration (linux/${{ matrix.goarch }})
     # Not on tags: the tagged commit already ran it on master, and it does not gate releases.
     if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-    # nft >= 1.1.0: 1.0.9 (Ubuntu 24.04) prints garbage for a single table flag in JSON (docs/testing.md#host-requirements).
-    runs-on: ubuntu-26.04
+    strategy:
+      fail-fast: false
+      matrix:
+        # Ubuntu 26.04 for nft >= 1.1.0: 1.0.9 (Ubuntu 24.04) prints garbage for a single table flag
+        # in JSON (docs/testing.md#host-quirks).
+        include:
+          - { goarch: amd64, runner: ubuntu-26.04 }
+          - { goarch: arm64, runner: ubuntu-26.04-arm }
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
