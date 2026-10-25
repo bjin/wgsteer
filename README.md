@@ -1,5 +1,9 @@
 # wgsteer
 
+[![CI](https://img.shields.io/github/actions/workflow/status/bjin/wgsteer/ci.yml?branch=master)](https://github.com/bjin/wgsteer/actions/workflows/ci.yml?query=branch%3Amaster)
+[![Release](https://img.shields.io/github/v/release/bjin/wgsteer)](https://github.com/bjin/wgsteer/releases/latest)
+[![License: MIT](https://img.shields.io/github/license/bjin/wgsteer)](LICENSE)
+
 A Linux daemon that keeps one WireGuard client peer on the best of several equivalent UDP endpoints. Each candidate (a relay `ip:port`, `[ipv6]:port`, or the server's own address as the last fallback) must reach the same server `ip:port`, so the session survives every switch without a handshake. The daemon measures every candidate continuously, switches the live device's peer endpoint when the current one is significantly worse (or down), returns to earlier-listed endpoints once they are no longer worse, and blocks roaming back with an nftables deny-list.
 
 ## How it works
