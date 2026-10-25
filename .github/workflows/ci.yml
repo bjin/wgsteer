@@ -47,6 +47,10 @@ jobs:
           if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
+          # Ubuntu 26.04 confines /usr/bin/wg to key files under /etc/wireguard; the harness keeps them in /tmp.
+          if [ -e /etc/apparmor.d/wg ]; then
+            sudo apparmor_parser -R /etc/apparmor.d/wg
+          fi
           # Load the kernel modules up front: a missing one fails here instead of mid-suite.
           sudo modprobe -a wireguard veth tun nf_tables sch_netem sch_ingress cls_flower act_pedit act_csum
       - run: make integration

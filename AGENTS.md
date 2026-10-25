@@ -9,7 +9,7 @@ Go daemon that keeps one WireGuard client peer on the best of several equivalent
 | `make build` | Static binary `./wgsteer` (`CGO_ENABLED=0`, `-trimpath`, `-s -w`) |
 | `make build-arm64` | `./wgsteer-arm64` |
 | `make test` | `gofmt -l` must be empty, `go vet ./...`, `go test ./...` (no privileges; privileged tests skip) |
-| `make integration` | Builds, runs the `internal/nftable` and `internal/wgdev` privileged test binaries under `unshare -rn`, then `python3 tests/integration/test_daemon.py -v` |
+| `make integration` | Builds, downloads the modules, runs the `internal/nftable` and `internal/wgdev` privileged test binaries under `unshare -rn`, then `python3 tests/integration/test_daemon.py -v` |
 | `go test ./internal/<pkg>/...` | One package; `go test -short ./internal/policy/...` runs a quarter of the simulation seeds |
 | `go test -c -o .nftable.test ./internal/nftable && unshare -rn ./.nftable.test -test.v` | Privileged nft tests alone (same for `internal/wgdev`) |
 | `python3 tests/integration/test_topology.py -v` | Namespace harness self-test (no daemon) |
