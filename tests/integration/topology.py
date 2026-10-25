@@ -402,15 +402,29 @@ def _spike_dist(dirpath, pct):
 
 # ----------------------------------------------------------- wireguard-go
 
+WGGO_MODULE = "golang.zx2c4.com/wireguard"
+
+# wireguard-go PR #135 (https://github.com/WireGuard/wireguard-go/pull/135, not merged): StdNetBind.Send
+# resizes the pooled destination before copying into it. The pinned version copies first, so the
+# first IPv6 send through each pooled address last used for IPv4 goes to a truncated address
+# (docs/caveats.md#upstream-wireguard-go-bind-bug): after a v4 -> v6 endpoint change wg0 loses
+# packets, a few per process at random times, and the tests asserting loss-free traffic fail.
+_WGGO_BIND_FIX = (
+    ("\t\tcopy(ua.IP, as16[:])\n\t\tua.IP = ua.IP[:16]\n", "\t\tua.IP = ua.IP[:16]\n\t\tcopy(ua.IP, as16[:])\n"),
+    ("\t\tcopy(ua.IP, as4[:])\n\t\tua.IP = ua.IP[:4]\n", "\t\tua.IP = ua.IP[:4]\n\t\tcopy(ua.IP, as4[:])\n"),
+)
+
 _wggo_path = None
 
 
 def wireguard_go_binary():
     """
-    Path to a wireguard-go binary built from the module pinned in go.mod
-    (`go build golang.zx2c4.com/wireguard` in the repo root, offline). Built
-    once per test process; WGSTEER_WIREGUARD_GO overrides it. Raises if the
-    build would touch go.mod/go.sum.
+    Path to a wireguard-go binary built offline from the module pinned in
+    go.mod with _WGGO_BIND_FIX applied: a patched copy of the module replaces
+    it through a temporary go.work, so every other dependency stays at the
+    version go.mod selects. Built once per test process; WGSTEER_WIREGUARD_GO
+    overrides it. Raises if the build would touch go.mod/go.sum or the fix no
+    longer applies (drop it once the pinned version contains it).
     """
     global _wggo_path
     if os.environ.get("WGSTEER_WIREGUARD_GO"):
@@ -419,17 +433,42 @@ def wireguard_go_binary():
         return _wggo_path
     d = tempfile.mkdtemp(prefix="wgsteer-wggo-")
     atexit.register(shutil.rmtree, d, True)
+    env = dict(os.environ, GOPROXY="off", GOFLAGS="-mod=readonly", CGO_ENABLED="0")
+
+    def go(*args, env=env):
+        p = subprocess.run(["go", *args], cwd=REPO_ROOT, env=env, capture_output=True, text=True)
+        if p.returncode != 0:
+            raise RuntimeError(f"go {' '.join(args)} failed: {p.stderr.strip()}")
+        return p.stdout.strip()
+
+    go_version = go("list", "-m", "-f", "{{.GoVersion}}")
+    version, _, moddir = go("list", "-m", "-f", "{{.Version}} {{.Dir}}", WGGO_MODULE).partition(" ")
+    if not moddir:
+        raise RuntimeError(f"{WGGO_MODULE} {version} is not in the module cache")
+    src = os.path.join(d, "wireguard")
+    shutil.copytree(moddir, src, copy_function=shutil.copyfile)
+    for root, _, _ in os.walk(src):
+        os.chmod(root, 0o755)  # copytree keeps the module cache's read-only directory modes
+    bind = os.path.join(src, "conn", "bind_std.go")
+    with open(bind) as f:
+        code = f.read()
+    for old, new in _WGGO_BIND_FIX:
+        if code.count(old) != 1:
+            raise RuntimeError(f"{WGGO_MODULE} {version}: conn/bind_std.go no longer matches _WGGO_BIND_FIX")
+        code = code.replace(old, new)
+    with open(bind, "w") as f:
+        f.write(code)
+    work = os.path.join(d, "go.work")
+    with open(work, "w") as f:
+        f.write(f"go {go_version}\n\nuse {REPO_ROOT}\n\nreplace {WGGO_MODULE} {version} => {src}\n")
     out = os.path.join(d, "wireguard-go")
     before = [(REPO_ROOT / f).read_bytes() for f in ("go.mod", "go.sum")]
-    env = dict(os.environ, GOPROXY="off", GOFLAGS="-mod=readonly", CGO_ENABLED="0")
-    p = subprocess.run(
-        ["go", "build", "-o", out, "golang.zx2c4.com/wireguard"], cwd=REPO_ROOT, env=env, capture_output=True, text=True
-    )
-    after = [(REPO_ROOT / f).read_bytes() for f in ("go.mod", "go.sum")]
-    if before != after:
-        raise RuntimeError("building wireguard-go modified go.mod/go.sum")
-    if p.returncode != 0:
-        raise RuntimeError(f"go build golang.zx2c4.com/wireguard failed: {p.stderr.strip()}")
+    try:
+        go("build", "-o", out, WGGO_MODULE, env=dict(env, GOWORK=work))
+    finally:
+        after = [(REPO_ROOT / f).read_bytes() for f in ("go.mod", "go.sum")]
+        if before != after:
+            raise RuntimeError("building wireguard-go modified go.mod/go.sum")
     _wggo_path = out
     return out
 

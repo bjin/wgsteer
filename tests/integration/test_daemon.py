@@ -320,13 +320,10 @@ class DaemonTestBase(unittest.TestCase):
             time.sleep(interval)
         self.assertEqual([e for e in seen if e != endpoint], [], f"wg0 left {endpoint}")
 
-    def assert_traffic(self, count=10, settle=5.0, warmup=0):
-        """wg0 passes traffic: once the first ping is answered (the server may still roam), all are
-        (after warmup unchecked pings)."""
+    def assert_traffic(self, count=10, settle=5.0):
+        """wg0 passes traffic: once the first ping is answered (the server may still roam), all are."""
         t = self.topo
         wait_until(lambda: t.ping(count=1, timeout=0.5).received, timeout=settle, interval=0, desc="ping via wg0")
-        if warmup:
-            t.ping(count=warmup, interval=0.02, timeout=0.3)
         r = t.ping(count=count, interval=0.05)
         self.assertEqual(r.received, count, r.output)
 
@@ -476,9 +473,7 @@ class Scenarios:
         sw = self.force_outage(d, "relay1")
         self.assertEqual(sw["to"], R3)
         t.wait_wg0_endpoint(R3)
-        # wireguard-go's StdNetBind (userspace wg0) corrupts the first IPv6 sends after IPv4 ones
-        # (pooled UDPAddr reused with a 4-byte IP, conn/bind_std.go Send): warm up first.
-        self.assert_traffic(settle=10, warmup=20 if t.userspace else 0)
+        self.assert_traffic(settle=10)
         self.assertEqual(t.server_peer_endpoint().rsplit(":", 1)[0], f"[{p3.server_sees}]")
         self.assertEqual({r.family for r in self.assert_table(R3).drop_rules()}, {"ip"})
 

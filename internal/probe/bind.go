@@ -21,9 +21,15 @@ import (
 // bytes 4-15 are left over from an earlier IPv6 destination (sendmmsg to
 // fd00:231:: instead of fd00:231:3::1 was observed). The probe alternates
 // endpoints and families every slot, so IPv6 endpoints would look mostly
-// lossy. Drop udpBind once upstream fixes it; the check is the send pattern
-// of TestUDPBindAlternatingFamilies run against conn.NewStdNetBind() (the
-// pinned version loses nearly every IPv6 packet there).
+// lossy.
+//
+// Remove udpBind once wireguard-go PR #135
+// (https://github.com/WireGuard/wireguard-go/pull/135, which resizes ua.IP
+// before the copy) is merged and a version containing it is pinned: run the
+// send pattern of TestUDPBindAlternatingFamilies against conn.NewStdNetBind()
+// (the pinned version loses nearly every IPv6 packet there), then let the
+// probe default to conn.NewDefaultBind() and drop _WGGO_BIND_FIX from
+// tests/integration/topology.py.
 type udpBind struct {
 	mu     sync.Mutex
 	v4, v6 *net.UDPConn

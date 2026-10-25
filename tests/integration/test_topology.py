@@ -281,10 +281,7 @@ class UserspaceTopologyTest(TopologyTestBase):
         self.assertGreater(dev.listen_port, 0)
         for name in ("relay1", "relay3", "direct"):
             with self.subTest(path=name):
-                # wireguard-go's StdNetBind corrupts the first v6 sends after v4
-                # sends (pooled UDPAddr truncated to 4 bytes, conn/bind_std.go
-                # Send), so warm up before asserting a loss-free path.
-                self.use_path(name, pings=20)
+                self.use_path(name)
                 self.assertEqual(t.ping(count=5, interval=0.05).received, 5)
         port = t.recreate_wg0()
         self.assertEqual(t.wg0().listen_port, port)
