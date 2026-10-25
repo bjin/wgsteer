@@ -29,7 +29,8 @@ jobs:
     name: Integration (linux/amd64)
     # Not on tags: the tagged commit already ran it on master, and it does not gate releases.
     if: ${{ !startsWith(github.ref, 'refs/tags/') }}
-    runs-on: ubuntu-latest
+    # nft >= 1.1.0: 1.0.9 (Ubuntu 24.04) prints garbage for a single table flag in JSON (docs/testing.md#host-requirements).
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
