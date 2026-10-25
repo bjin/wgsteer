@@ -25,6 +25,31 @@ jobs:
       - run: make build
       - run: ./wgsteer --version
 
+  integration:
+    name: Integration (linux/amd64)
+    # Not on tags: the tagged commit already ran it on master, and it does not gate releases.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: Prepare host
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends iperf3 nftables wireguard-tools
+          # Ubuntu's AppArmor withholds capabilities inside unprivileged user namespaces.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          # Load the kernel modules up front: a missing one fails here instead of mid-suite.
+          sudo modprobe -a wireguard veth tun nf_tables sch_netem sch_ingress cls_flower act_pedit act_csum
+      - run: make integration
+
   build:
     name: Build (linux/${{ matrix.goarch }})
     if: startsWith(github.ref, 'refs/tags/v')
