@@ -11,8 +11,14 @@ permissions:
 
 jobs:
   test:
-    name: Test (linux/amd64)
-    runs-on: ubuntu-latest
+    name: Test (linux/${{ matrix.goarch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { goarch: amd64, runner: ubuntu-26.04 }
+          - { goarch: arm64, runner: ubuntu-26.04-arm }
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -24,6 +30,43 @@ jobs:
       - run: make test
       - run: make build
       - run: ./wgsteer --version
+
+  integration:
+    name: Integration (linux/${{ matrix.goarch }})
+    # Not on tags: the tagged commit already ran it on master, and it does not gate releases.
+    if: ${{ !startsWith(github.ref, 'refs/tags/') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Ubuntu 26.04 for nft >= 1.1.0: 1.0.9 (Ubuntu 24.04) prints garbage for a single table flag
+        # in JSON (docs/testing.md#host-quirks).
+        include:
+          - { goarch: amd64, runner: ubuntu-26.04 }
+          - { goarch: arm64, runner: ubuntu-26.04-arm }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: Prepare host
+        run: |
+          sudo apt-get update -q
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends iperf3 nftables wireguard-tools
+          # Ubuntu's AppArmor withholds capabilities inside unprivileged user namespaces.
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          # Ubuntu 26.04 confines /usr/bin/wg to key files under /etc/wireguard; the harness keeps them in /tmp.
+          if [ -e /etc/apparmor.d/wg ]; then
+            sudo apparmor_parser -R /etc/apparmor.d/wg
+          fi
+          # Load the kernel modules up front: a missing one fails here instead of mid-suite.
+          sudo modprobe -a wireguard veth tun nf_tables sch_netem sch_ingress cls_flower act_pedit act_csum
+      - run: make integration
 
   build:
     name: Build (linux/${{ matrix.goarch }})

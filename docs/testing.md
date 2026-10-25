@@ -7,7 +7,7 @@
 | Privileged Go tests | `internal/nftable/privileged_test.go`, `internal/wgdev/privileged_test.go`, `internal/probe/bind_linux_test.go` | `CAP_NET_ADMIN` in a user+network namespace | `make integration` (nftable, wgdev) |
 | Namespace suites | `tests/integration/test_topology.py`, `tests/integration/test_daemon.py` | unprivileged user namespace | `python3 tests/integration/<file> -v` |
 
-`make integration` builds the binary, runs the nftable and wgdev test binaries under `unshare -rn` (each binary is removed afterwards, the exit status kept), then `python3 tests/integration/test_daemon.py -v`.
+`make integration` builds the binary, downloads every module in `go.mod` (the namespace suite builds wireguard-go with `GOPROXY=off`), runs the nftable and wgdev test binaries under `unshare -rn` (each binary is removed afterwards, the exit status kept), then `python3 tests/integration/test_daemon.py -v`.
 
 ## Unit tests (no privileges)
 
@@ -179,24 +179,26 @@ Every test builds a fresh topology and runs its own daemon(s). All paths carry a
 
 - Unprivileged user namespaces enabled; `/dev/net/tun` accessible (wireguard-go variant).
 - Kernel WireGuard, nftables, veth, `sch_netem`, clsact/flower/pedit available inside a user namespace.
-- Tools: `ip`, `nft`, `wg`, `tc`, `ping`, `iperf3`, `sysctl`, `setpriv` (util-linux), `go`, Python 3.
+- Tools: `ip`, `nft` (≥ 1.1.0, see below), `wg`, `tc`, `ping`, `iperf3`, `sysctl`, `setpriv` (util-linux), `go`, Python 3.
 - No qemu: everything runs in unprivileged namespaces.
 
 ### Host quirks
 
 - **nft payload mangling is not permitted in a user namespace** (`ip saddr set`, `udp sport set` fail with `EPERM`; `meta mark set` works). relay2's alias rewrite therefore uses tc (clsact egress with flower + pedit + csum, after NAT).
-- **tc reads netem distribution tables only from its compiled-in directory** (iproute2 7.2: `/usr/share/tc`; `TC_LIB_DIR` only affects plugins). Every namespace bind-mounts a private table directory over it (`WGSTEER_TC_DIST_DIR` overrides the source). The harness always passes an explicit table with jitter, because netem keeps the old table when a change omits one.
+- **nft 1.0.9 (Ubuntu 24.04) corrupts a single table flag in JSON output.** For a table with only `flags owner`, `nft -j list tables`/`list table` print a freed string (`"flags": "t"`, the release name, or bytes that are not JSON). The harness reads table flags from `nft -j`, so every owner-flag assertion fails. Fixed upstream by "json: fix use after free in table_flags_json()" (b04512cf), first released in 1.1.0; 1.1.6 (Ubuntu 26.04) prints `"flags": ["owner"]`.
+- **Ubuntu 26.04 confines `/usr/bin/wg` with AppArmor** (`/etc/apparmor.d/wg`): key files are readable only under `/etc/wireguard`, so `wg set … private-key /tmp/wgsteer-it-*/…` fails with `fopen: Permission denied`. Unload the profile for the suite: `sudo apparmor_parser -R /etc/apparmor.d/wg`. Ubuntu also withholds capabilities in unprivileged user namespaces until `kernel.apparmor_restrict_unprivileged_userns=0`.
+- **tc reads netem distribution tables only from its compiled-in directory** (iproute2 7.2 on Arch: `/usr/share/tc`, `TC_LIB_DIR` only affects plugins; Debian and Ubuntu: `/usr/lib/<multiarch>/tc`). Every namespace bind-mounts a private table directory over it (`WGSTEER_TC_DIST_DIR` overrides the source). The harness always passes an explicit table with jitter, because netem keeps the old table when a change omits one.
 - **New namespaces start with `rp_filter=1`.** The fwmark variant needs wg-quick's conntrack mark save/restore table (`table ip wg-quick-wg0`). wg-quick's `suppress_prefixlength 0` rule is left out on purpose: the relays are on directly connected subnets, so it would let unmarked packets bypass wg0.
 - **`/run/wireguard` does not exist on the host and `/run` is not writable** from the user namespace; the client node gets a private mount namespace with a tmpfs on `/run`.
 - **The pinned wireguard-go's `StdNetBind` corrupts IPv6 destinations** after an IPv4 send ([caveats.md](caveats.md#upstream-wireguard-go-bind-bug)). A userspace wg0 switched from an IPv4 to an IPv6 endpoint loses one send per pooled address last used for IPv4 (`sendmmsg: network is unreachable` in its log). `sync.Pool` keeps addresses per scheduler P, so these losses can land seconds after the switch and warm-up pings do not reliably reach every pooled address. Unpatched, the userspace tests that switch to relay3 lost pings in `assert_traffic` (with relay3 forced as the target: 7 of 10 runs of `test_loss_degradation`/`test_clean_stop`). The harness therefore builds its wireguard-go with the upstream fix (`_WGGO_BIND_FIX` in `topology.py`); the build fails when the patch no longer applies, which is the signal to drop it after pinning a fixed version.
 
 ## CI
 
-`.github/workflows/ci.yml` on GitHub Actions (`ubuntu-latest`, latest stable Go). Checkouts fetch the full history and tags so `go build` stamps the version.
+`.github/workflows/ci.yml` on GitHub Actions with the latest stable Go. `test` and `integration` run natively on linux/amd64 (`ubuntu-26.04`) and linux/arm64 (`ubuntu-26.04-arm`); the release jobs cross-compile on `ubuntu-latest`. Checkouts fetch the full history and tags so `go build` stamps the version.
 
 | Trigger | Jobs |
 |---|---|
-| Push to `master`, pull request | `test`: `make test`, `make build`, `./wgsteer --version` on linux/amd64 |
-| Push of a `v*` tag | `test`; then `build` per GOARCH (`amd64`, `arm64`, `mips64` with `GOMIPS64=softfloat`): `make build`, check that the stamped version equals the tag, pack `wgsteer-<tag without v>-linux-<GOARCH>.tar.gz` (a directory of the same name with `wgsteer`, `LICENSE`, `README.md`); then `release`: a GitHub pre-release from the tag with every tarball and generated notes |
+| Push to `master`, pull request | `test`: `make test`, `make build`, `./wgsteer --version`. `integration`: host preparation (below), then `make integration` (about 7 minutes) |
+| Push of a `v*` tag | `test`; then `build` per GOARCH (`amd64`, `arm64`, `mips64` with `GOMIPS64=softfloat`): `make build`, check that the stamped version equals the tag, pack `wgsteer-<tag without v>-linux-<GOARCH>.tar.gz` (a directory of the same name with `wgsteer`, `LICENSE`, `README.md`); then `release`: a GitHub pre-release from the tag with every tarball and generated notes. `integration` does not run on tags and does not gate releases |
 
-The privileged Go tests and the namespace suites do not run in CI. No 32-bit targets: [caveats.md](caveats.md#no-32-bit-builds).
+`integration` host preparation: install `iperf3`, `nftables`, `wireguard-tools`; set `kernel.apparmor_restrict_unprivileged_userns=0`; unload the AppArmor profile for `wg`; `modprobe` wireguard, veth, tun, nf_tables, sch_netem, sch_ingress, cls_flower, act_pedit and act_csum (see [Host quirks](#host-quirks)). No 32-bit targets: [caveats.md](caveats.md#no-32-bit-builds).

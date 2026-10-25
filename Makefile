@@ -25,8 +25,10 @@ fmt:
 	gofmt -w .
 
 # Privileged tests: Go packages that need CAP_NET_ADMIN, then the namespace
-# suite. Both run inside an unprivileged user + network namespace.
+# suite. Both run inside an unprivileged user + network namespace. The suite
+# builds wireguard-go offline, so every module in go.mod must be downloaded.
 integration: build
+	go mod download
 	go test -c -o .nftable.test ./internal/nftable
 	unshare -rn ./.nftable.test -test.v; s=$$?; rm -f .nftable.test; exit $$s
 	go test -c -o .wgdev.test ./internal/wgdev

@@ -9,14 +9,14 @@ Go daemon that keeps one WireGuard client peer on the best of several equivalent
 | `make build` | Static binary `./wgsteer` (`CGO_ENABLED=0`, `-trimpath`, `-s -w`) |
 | `make build-arm64` | `./wgsteer-arm64` |
 | `make test` | `gofmt -l` must be empty, `go vet ./...`, `go test ./...` (no privileges; privileged tests skip) |
-| `make integration` | Builds, runs the `internal/nftable` and `internal/wgdev` privileged test binaries under `unshare -rn`, then `python3 tests/integration/test_daemon.py -v` |
+| `make integration` | Builds, downloads the modules, runs the `internal/nftable` and `internal/wgdev` privileged test binaries under `unshare -rn`, then `python3 tests/integration/test_daemon.py -v` |
 | `go test ./internal/<pkg>/...` | One package; `go test -short ./internal/policy/...` runs a quarter of the simulation seeds |
 | `go test -c -o .nftable.test ./internal/nftable && unshare -rn ./.nftable.test -test.v` | Privileged nft tests alone (same for `internal/wgdev`) |
 | `python3 tests/integration/test_topology.py -v` | Namespace harness self-test (no daemon) |
 | `python3 tests/integration/test_daemon.py -v` | Daemon scenarios in the namespace topology; run `make build` first |
 | `python3 tools/tune.py --data DIR extract LOGDIR`, then `verify`, `paths`, `replay`/`faults`/`sim -- FLAGS`, `tune` | Offline analysis and flag tuning on a recorded debug dry-run ([docs/scoring.md](docs/scoring.md#tuning-on-recorded-data)); builds `cmd/wgsteer-replay` and the policy test binary into `DIR` |
 
-CI (`.github/workflows/ci.yml`): `make test` and `make build` on linux/amd64 for pushes to `master` and pull requests; a `v*` tag also builds release tarballs for `amd64`, `arm64` and `mips64` and publishes them as a GitHub pre-release ([docs/testing.md](docs/testing.md#ci)). 32-bit targets do not compile with the pinned nftables ([docs/caveats.md](docs/caveats.md#no-32-bit-builds)).
+CI (`.github/workflows/ci.yml`): `make test`, `make build` and `make integration` natively on linux/amd64 and linux/arm64 (Ubuntu 26.04) for pushes to `master` and pull requests; a `v*` tag runs `make test`, then builds release tarballs for `amd64`, `arm64` and `mips64` and publishes them as a GitHub pre-release ([docs/testing.md](docs/testing.md#ci)). 32-bit targets do not compile with the pinned nftables ([docs/caveats.md](docs/caveats.md#no-32-bit-builds)).
 
 Test layout, host requirements and quirks: [docs/testing.md](docs/testing.md).
 
