@@ -26,6 +26,7 @@ import shutil
 import signal
 import statistics
 import subprocess
+import sysconfig
 import tempfile
 import time
 from dataclasses import dataclass, field
@@ -352,10 +353,17 @@ _NETEM_DIST_SCALE = 8192
 _DIST_SIZE = 4096
 
 # Where this host's tc reads netem distribution tables. iproute2 7.2 on Arch
-# hardcodes /usr/share/tc (TC_LIB_DIR only affects plugins); other builds use
-# /usr/lib/tc. Every node bind-mounts its own table directory over it.
+# hardcodes /usr/share/tc (TC_LIB_DIR only affects plugins); Debian and Ubuntu
+# use /usr/lib/<multiarch>/tc, other builds /usr/lib/tc. Every node bind-mounts
+# its own table directory over it.
+_MULTIARCH = sysconfig.get_config_var("MULTIARCH")  # e.g. x86_64-linux-gnu
 TC_DIST_DIR = os.environ.get("WGSTEER_TC_DIST_DIR") or next(
-    (d for d in ("/usr/share/tc", "/usr/lib/tc", "/usr/lib64/tc") if os.path.isdir(d)), None
+    (
+        d
+        for d in ("/usr/share/tc", _MULTIARCH and f"/usr/lib/{_MULTIARCH}/tc", "/usr/lib/tc", "/usr/lib64/tc")
+        if d and os.path.isdir(d)
+    ),
+    None,
 )
 
 
