@@ -62,3 +62,17 @@ Who is affected:
 | The namespace harness's userspace wg0 | No: built with the PR applied ([testing.md](testing.md#host-quirks)) | `_WGGO_BIND_FIX` in `tests/integration/topology.py` |
 
 Carrying the patch in wgsteer would be easy (a `replace` directive in `go.mod`, which applies because wgsteer is the main module) but is deliberately not done: it would only allow deleting `udpBind`. The PR author's fork (`github.com/mp2720/wireguard-go v0.0.0-20251220215513-b45f43da38b4`) works as a replacement but has diverged from the pinned upstream commit (1 ahead, 2 behind: it lacks a handshake-response race fix and a TUN GRO header fix), so it would silently roll those back. A correct carried patch needs an own fork at the pinned upstream commit with the PR commit cherry-picked (or a local-path `replace` to a patched copy in the repo), rebased on every upgrade. When the PR is merged: bump the pin, run the `TestUDPBindAlternatingFamilies` send pattern against `conn.NewStdNetBind()`, then drop `udpBind` and the harness's `_WGGO_BIND_FIX` (its build fails once the patch no longer applies).
+
+## No 32-bit builds
+
+wgsteer builds only for 64-bit targets. The pinned `github.com/google/nftables v0.3.1-0.20260430172505-f9b52ed2ba65` (upstream master as of 2026-10-25) does not compile where `int` is 32 bits:
+
+```
+conn.go:538:93: cannot use math.MaxUint32 (untyped int constant 4294967295) as int value in argument to fmt.Sprintf (overflows)
+```
+
+`allocateTransactionID` passes the untyped constant `math.MaxUint32` to `fmt.Sprintf`, which converts it to `int`. No upstream issue or fix was found (2026-10-25). The pin cannot move back: v0.3.0 has no owner-flag tables.
+
+With that argument changed to `uint32(math.MaxUint32)` (a patched copy of the module through a temporary `go.work` `replace`), `go build ./cmd/wgsteer` and `go vet ./...` pass for `arm` (`GOARM=5` and `7`), `mips` and `mipsle` (`GOMIPS=softfloat`); nothing has been run on 32-bit hardware. Shipping that would need a carried patch like the one discussed above, which is not done. When upstream is fixed: bump the pin, run the tests on a 32-bit host (or under qemu-user), and add the targets to the release matrix in `.github/workflows/ci.yml`.
+
+Release binaries therefore cover `linux/amd64`, `linux/arm64` and `linux/mips64` (`GOMIPS64=softfloat`). Among OpenWrt targets that includes `x86/64`, `mediatek/filogic`, `qualcommax`, `rockchip`, `bcm27xx` (bcm2710 and later) and `octeon`, but not the 32-bit `ramips` (mt7621, mt76x8), `ath79`, `ipq40xx` or `mvebu`.

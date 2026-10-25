@@ -11,6 +11,7 @@ A Linux daemon that keeps one WireGuard client peer on the best of several equiv
 ## Requirements
 
 - Linux >= 5.12 (nftables owner-flag tables). No `nft` or `wg` binary is needed at runtime.
+- A 64-bit target: the pinned nftables library does not compile for 32-bit ones such as `arm`, `mips` and `mipsle` ([docs/caveats.md](docs/caveats.md#no-32-bit-builds)).
 - `CAP_NET_ADMIN`, and no other capability (wgctrl reads and writes, nftables, `SO_MARK`); also for `--dry-run`. Runs as a non-root user holding it; startup logs the effective capabilities and fails fast without it. Service-manager setups, including OpenWrt procd: [docs/design.md](docs/design.md#privileges).
 - A WireGuard device (kernel or userspace) whose peer for the server is the managed peer. Other peers are left alone (startup logs a warning).
 - Go 1.26 or newer to build.
@@ -21,6 +22,10 @@ A Linux daemon that keeps one WireGuard client peer on the best of several equiv
 make build          # ./wgsteer (static, CGO_ENABLED=0)
 make build-arm64    # ./wgsteer-arm64
 ```
+
+Built from a git checkout, the binary carries a version derived from the tags: `v0.1.0` at a tag, a pre-release pseudo-version based on the previous tag for later commits (`v0.1.1-0.20261025110335-99e63646c2a9`), `+dirty` with uncommitted changes. `wgsteer --version` prints it; the first log line (`starting`) includes it.
+
+Prebuilt static binaries are attached to the [GitHub releases](https://github.com/bjin/wgsteer/releases) as `wgsteer-<version>-linux-<GOARCH>.tar.gz` for `amd64`, `arm64` and `mips64` (soft-float, e.g. OpenWrt `octeon`).
 
 ## Usage
 

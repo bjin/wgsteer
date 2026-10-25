@@ -189,3 +189,14 @@ Every test builds a fresh topology and runs its own daemon(s). All paths carry a
 - **New namespaces start with `rp_filter=1`.** The fwmark variant needs wg-quick's conntrack mark save/restore table (`table ip wg-quick-wg0`). wg-quick's `suppress_prefixlength 0` rule is left out on purpose: the relays are on directly connected subnets, so it would let unmarked packets bypass wg0.
 - **`/run/wireguard` does not exist on the host and `/run` is not writable** from the user namespace; the client node gets a private mount namespace with a tmpfs on `/run`.
 - **The pinned wireguard-go's `StdNetBind` corrupts IPv6 destinations** after an IPv4 send ([caveats.md](caveats.md#upstream-wireguard-go-bind-bug)). A userspace wg0 switched from an IPv4 to an IPv6 endpoint loses one send per pooled address last used for IPv4 (`sendmmsg: network is unreachable` in its log). `sync.Pool` keeps addresses per scheduler P, so these losses can land seconds after the switch and warm-up pings do not reliably reach every pooled address. Unpatched, the userspace tests that switch to relay3 lost pings in `assert_traffic` (with relay3 forced as the target: 7 of 10 runs of `test_loss_degradation`/`test_clean_stop`). The harness therefore builds its wireguard-go with the upstream fix (`_WGGO_BIND_FIX` in `topology.py`); the build fails when the patch no longer applies, which is the signal to drop it after pinning a fixed version.
+
+## CI
+
+`.github/workflows/ci.yml` on GitHub Actions (`ubuntu-latest`, latest stable Go). Checkouts fetch the full history and tags so `go build` stamps the version.
+
+| Trigger | Jobs |
+|---|---|
+| Push to `master`, pull request | `test`: `make test`, `make build`, `./wgsteer --version` on linux/amd64 |
+| Push of a `v*` tag | `test`; then `build` per GOARCH (`amd64`, `arm64`, `mips64` with `GOMIPS64=softfloat`): `make build`, check that the stamped version equals the tag, pack `wgsteer-<tag without v>-linux-<GOARCH>.tar.gz` (a directory of the same name with `wgsteer`, `LICENSE`, `README.md`); then `release`: a GitHub pre-release from the tag with every tarball and generated notes |
+
+The privileged Go tests and the namespace suites do not run in CI. No 32-bit targets: [caveats.md](caveats.md#no-32-bit-builds).
