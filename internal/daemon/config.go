@@ -115,6 +115,10 @@ func (c *Config) attrs() []any {
 	}
 }
 
+// ErrVersion is returned by ParseFlags when --version is given; the caller
+// prints Version and exits.
+var ErrVersion = errors.New("version requested")
+
 // ParseFlags parses the command line into a validated Config. Defaults for
 // the scoring constants come from defaults, so the policy package stays the
 // single source of truth for them.
@@ -154,9 +158,13 @@ func ParseFlags(args []string, defaults Config, output io.Writer) (Config, error
 	fs.StringVar(&logLevel, "log-level", c.LogLevel.String(), "log level: debug, info, warn, error")
 	fs.DurationVar(&c.SummaryInterval, "summary-interval", c.SummaryInterval, "periodic per-endpoint summary (0 disables)")
 	fs.DurationVar(&c.Watchdog, "watchdog", c.Watchdog, "exit if the event loop stalls this long")
+	showVersion := fs.Bool("version", false, "print the version and exit")
 
 	if err := fs.Parse(args); err != nil {
 		return Config{}, err
+	}
+	if *showVersion {
+		return Config{}, ErrVersion
 	}
 	if fs.NArg() > 0 {
 		return Config{}, fmt.Errorf("unexpected arguments: %s", strings.Join(fs.Args(), " "))

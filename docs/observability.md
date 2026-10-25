@@ -15,7 +15,7 @@ Info lines in this order, before the loop starts:
 
 | Message | Keys |
 |---|---|
-| `starting` | `version`, `revision`, `go_version`, `kernel`, `pid` |
+| `starting` | `version` (module version stamped by `go build` from git: the tag, or a pseudo-version based on the previous tag, `+dirty` with uncommitted changes; `(devel)` without VCS information, e.g. `go run`; also printed by `--version`), `revision`, `go_version`, `kernel`, `pid` |
 | `config` | One key per flag: `device`, `probe_config`, `endpoints`, `probe_addr`, `target`, `probe_interval`, `probe_timeout`, `probe_size`, `probe_mtu`, `history`, `half_life`, `min_samples`, `noise_gate`, `loss_weight`, `jitter_weight`, `order_bias`, `margin`, `margin_abs`, `persist`, `cooldown`, `wait_to_restore`, `outage_epsilon`, `reconcile_interval`, `kick`, `nft_table`, `dry_run`, `log_level`, `summary_interval`, `watchdog` |
 | `privileges` | `uid`, `euid`, `gid`, `capabilities` (effective set: `all`, `none`, or a list such as `cap_net_admin`) |
 | `endpoint` (one per entry) | `index`, `endpoint`, `family` (`ipv4`/`ipv6`) |
@@ -178,6 +178,6 @@ Latency values (`rtt_mean`, `rtt_std`, `latency`, `latency_se`, `cost`, `biased_
 
 | Code | Meaning |
 |---|---|
-| 0 | Clean stop (`SIGTERM`/`SIGINT`) or `-h`/`-help` |
+| 0 | Clean stop (`SIGTERM`/`SIGINT`), `-h`/`-help` or `--version` |
 | 1 | Invalid flags (message `wgsteer: <error>` on stderr) or a startup failure (`startup failed`) |
 | 3 | Watchdog: the event loop stalled longer than `--watchdog` |

@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"math"
 	"net/netip"
 	"os"
@@ -43,6 +44,17 @@ func readBuildInfo() buildInfo {
 		b.revision += "-dirty"
 	}
 	return b
+}
+
+// Version renders the build for --version, e.g.
+// "wgsteer v0.1.0 (99e63646c2a9, go1.26.2, linux/arm64)".
+func Version() string {
+	b := readBuildInfo()
+	rev := ""
+	if b.revision != "" {
+		rev = b.revision + ", "
+	}
+	return fmt.Sprintf("wgsteer %s (%s%s, %s/%s)", b.version, rev, b.goVersion, runtime.GOOS, runtime.GOARCH)
 }
 
 func kernelRelease() string {

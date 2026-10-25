@@ -1,8 +1,8 @@
 // Command wgsteer keeps one WireGuard client peer on the best of
 // several equivalent UDP endpoints.
 //
-// Exit codes: 0 clean stop (SIGTERM/SIGINT) or -help, 1 invalid flags or a
-// startup failure, 3 event-loop watchdog.
+// Exit codes: 0 clean stop (SIGTERM/SIGINT), -help or -version, 1 invalid
+// flags or a startup failure, 3 event-loop watchdog.
 package main
 
 import (
@@ -21,6 +21,10 @@ func main() {
 func run() int {
 	cfg, err := daemon.ParseFlags(os.Args[1:], daemon.DefaultConfig(), os.Stderr)
 	if errors.Is(err, flag.ErrHelp) {
+		return 0
+	}
+	if errors.Is(err, daemon.ErrVersion) {
+		fmt.Println(daemon.Version())
 		return 0
 	}
 	if err != nil {

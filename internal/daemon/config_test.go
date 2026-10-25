@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"io"
 	"strings"
 	"testing"
@@ -17,6 +18,18 @@ func TestParseFlagsRequired(t *testing.T) {
 	for _, f := range []string{"--probe-config", "--endpoints", "--probe-addr", "--target"} {
 		if !strings.Contains(err.Error(), f) {
 			t.Errorf("error %q does not name %s", err, f)
+		}
+	}
+}
+
+// --version needs no other flag and skips validation.
+func TestParseFlagsVersion(t *testing.T) {
+	for _, args := range [][]string{
+		{"--version"},
+		append(requiredArgs, "--history", "10", "--min-samples", "20", "--version"),
+	} {
+		if _, err := ParseFlags(args, DefaultConfig(), io.Discard); !errors.Is(err, ErrVersion) {
+			t.Errorf("%v: err = %v, want ErrVersion", args, err)
 		}
 	}
 }
