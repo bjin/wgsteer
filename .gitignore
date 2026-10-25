@@ -1,0 +1,6 @@
+/wgsteer
+/wgsteer-arm64
+/.nftable.test
+/.wgdev.test
+__pycache__/
+/tune-data/
