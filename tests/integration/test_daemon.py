@@ -378,9 +378,10 @@ class Scenarios:
         # --outage-epsilon pins K at its maximum (10), so the outage rule, which a lucky run of
         # 3-5 losses can fire first at 40% loss (~20% of runs), cannot pre-empt the rule under test.
         # 40% upstream loss can drop wg0's passive keepalive; the server then hears nothing for
-        # 15 s after its last data and starts a new handshake on its own, unrelated to the switch
-        # but breaking the unchanged-handshake checks. A 2 s keepalive keeps the server hearing
-        # from the client (all lost for 15 s: 0.4^7 ≈ 0.2%).
+        # 15 s after its last data (the reply to the topology's first ping) and starts a new
+        # handshake on its own, unrelated to the switch but breaking the unchanged-handshake
+        # checks. A 2 s keepalive, effective at once, reaches the server before the loss starts
+        # and cancels that deadline; the server sends no data afterwards to re-arm it.
         t.wg_set_keepalive(2)
         d = self.start({"outage-epsilon": "1e-30"})
         tm = d.tm
@@ -585,9 +586,11 @@ class KernelDaemonTest(Scenarios, DaemonTestBase):
         mark = d.mark()
         self.assert_wg0_stays(R1, NOT_SIGNIFICANT_S, interval=0.5)
         self.assertEqual(d.records("switch"), [])
-        # The daemon saw the difference (raw cost); only its noise-gated ratio stays below the margin.
+        # The daemon saw the difference (mean RTT); only its noise-gated ratio stays below the margin.
+        # Not the cost: it carries the runner's jitter (rtt_std_ms up to 1.4 ms on CI arm64, ×2.5),
+        # which can exceed the 2 ms RTT difference.
         last = {r["endpoint"]: r for r in d.records("summary", mark)}
-        self.assertGreater(float(last[R1]["cost"]), float(last[R2]["cost"]), last)
+        self.assertGreater(float(last[R1]["rtt_mean_ms"]), float(last[R2]["rtt_mean_ms"]), last)
 
     def _revert_under_background_loss(self, loss_pct):
         """

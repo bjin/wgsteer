@@ -174,6 +174,7 @@ Every test builds a fresh topology and runs its own daemon(s). All paths carry a
 `KernelDaemonTest` runs all 25 with kernel wg0; `UserspaceDaemonTest` reruns `test_adopt_at_start`, `test_loss_degradation`, `test_external_reset`, `test_ipv6` and `test_clean_stop` with wireguard-go as wg0. A full run takes about 6 minutes. Measured numbers are printed to stderr as `[metric] <test>: name=value (bound ...)`. A failing test prints the tail of each daemon log and keeps the full logs in a temp directory; `WGSTEER_LOG_DIR=<dir>` keeps the logs of every test.
 
 - Eligibility waits allow two WireGuard handshake retries (`REKEY_TIMEOUT`, about 5.3 s each): if the probe's first handshake is lost on a lossy path, its slots stay invalid until the next retry.
+- A persistent-keepalive change from one non-zero interval to another only takes effect at wg0's next packet (the armed timer keeps the old interval); enabling it from 0 sends a keepalive at once. `Topology.wg_set_keepalive` therefore goes through 0. Otherwise wg0 stays silent until its passive keepalive (10 s after the last data it received) or the old interval, and under upstream loss the server can hit its 15 s new-handshake deadline (`KEEPALIVE_TIMEOUT` + `REKEY_TIMEOUT` after its last data) and re-handshake on its own.
 
 ### Host requirements
 

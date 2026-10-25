@@ -974,7 +974,14 @@ class Topology:
         self.client.check(["wg", "set", DEVICE, "peer", self.keys.server_pub, "endpoint", endpoint])
 
     def wg_set_keepalive(self, seconds):
-        self.client.check(["wg", "set", DEVICE, "peer", self.keys.server_pub, "persistent-keepalive", str(seconds)])
+        """
+        Sets wg0's persistent keepalive, effective at once. A new non-zero interval alone only
+        takes effect at wg0's next packet (the armed timer keeps the old one, up to 25 s of
+        silence), while enabling it from 0 sends a keepalive immediately (kernel and
+        wireguard-go), so the change goes through 0.
+        """
+        for s in [0, seconds] if seconds else [0]:
+            self.client.check(["wg", "set", DEVICE, "peer", self.keys.server_pub, "persistent-keepalive", str(s)])
 
     def wait_wg0_endpoint(self, endpoint, timeout=5.0):
         if isinstance(endpoint, PathSpec):
